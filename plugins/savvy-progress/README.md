@@ -4,12 +4,16 @@
 > Added: the claude-config agents `scout` (Haiku), `builder` (Sonnet) and `reviewer` (Opus) are tiers of their own,
 > with their own crabs, and count for the bar and the panel's auto-open the way `savvy-*` workers do.
 > The progress bar's crab is the orchestrator (the main session): a conductor in a top hat whose baton keeps time.
+> The panel also lists the related background sessions (workers started with the CLI's background flag, in a worktree of this repository or launched by this session), with their state and branch,
+> and in a terminal without graphics the crabs are drawn as half-block text from the same costume data.
 > Install with `claude plugin install savvy-progress@berkays-mods`.
 
 A Claude Code mod: a progress bar above the prompt and a live panel of subagents. Made for the [savvy-flow](../savvy-flow) skill, and useful with any subagents.
 
 - **Progress bar**: the flow's title, phase, accepted tasks out of planned, and a button with the crew size that opens the panel. It appears once something reports progress (savvy-flow does) or a `savvy-*` worker starts.
 - **Agents panel** (`/agents-info` toggles it): running, finished and planned subagents with model, effort, task progress, context, estimated cost and time. Working crabs walk, and each savvy tier animates its prop: the astronaut floats, the detective sweeps the magnifier, the engineer turns the wrench, the chef tosses the omelette, the racer runs with a fluttering flag. `prefers-reduced-motion` stops them.
+- **Background sessions**: a *Background* section after Running and Finished (and in the bar's crew count) for background sessions that run in a linked worktree of this repository or that this session launched. Each row has the crab, name, tier, model and effort, state (busy, idle, waiting for you) and branch. It polls `claude agents --json` and `git worktree list` every 5 s, only while the panel is open or a flow's bar is up. Model and effort are known only for sessions this session launched with `--name` (read off the Bash or PowerShell command); the crab comes from `--agent scout|builder|reviewer`, else the model (Haiku scout, Sonnet builder, Opus reviewer), else the plain crab. No cost or tokens: they are not visible from here.
+- **Terminal crabs**: where there are no graphics, each subagent and background row, and the bar, shows its crab as text: the costume is drawn into a 30x28 grid, shrunk to 12x10 pixels and printed with half-blocks (`▀` in the top pixel's color over the bottom pixel's background). No animation.
 
 ## Tools it adds
 
