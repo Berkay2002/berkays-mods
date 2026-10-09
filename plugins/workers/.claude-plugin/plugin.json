@@ -1,0 +1,9 @@
+{
+  "name": "workers",
+  "description": "A pane of the sessions this one orchestrates: state, branch, commits ahead, changed files, last message, who needs you",
+  "author": {
+    "name": "Berkay Orhan"
+  },
+  "repository": "https://github.com/Berkay2002/berkays-mods",
+  "types": "./types/index.d.ts"
+}
