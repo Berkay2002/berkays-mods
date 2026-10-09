@@ -1,0 +1,8 @@
+{
+  "name": "limit-resume",
+  "description": "Resumes the session and its idle workers when a usage limit resets, and gives Claude the current 5h and weekly usage",
+  "author": {
+    "name": "Berkay Orhan"
+  },
+  "repository": "https://github.com/Berkay2002/berkays-mods"
+}
