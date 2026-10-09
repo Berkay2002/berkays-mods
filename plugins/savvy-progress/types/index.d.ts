@@ -40,6 +40,21 @@ export type AgentRun = {
   stepNote?: string
 }
 
+export type BgState = 'busy' | 'idle' | 'waiting'
+
+/** A background session related to this one, as the last poll of the agents list saw it. */
+export type BgSession = {
+  id: string
+  name: string
+  state: BgState
+  /** The crab: scout, builder, reviewer or other. */
+  tier: string
+  /** Known only for sessions this one launched. */
+  model?: string
+  effort?: string
+  branch?: string
+}
+
 export type Panel = {
   isCompact: boolean
   isDoneCollapsed: boolean
@@ -53,6 +68,9 @@ declare module 'claude-code' {
       agents: AgentRun[]
       panel: Panel
       now: number
+      bg: BgSession[]
+      /** What this session's own background launches asked for, by lowercase `--name`. */
+      launches: Record<string, { model?: string; effort?: string; agent?: string }>
     }
   }
 }

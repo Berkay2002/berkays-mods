@@ -1,7 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRun, Flow, Panel, Phase, PlannedTask } from '../types'
+import type { AgentRun, BgSession, Flow, Panel, Phase, PlannedTask } from '../types'
+import { aliasLabel, bgLaunches, bgState, branchOf, isRelated, parseAgents, parseWorktrees, tierFor } from './bg'
+import { SPRITE_W, boundsOf, downsample, rasterize, toRuns } from './sprite'
+import type { Fill, Grid, Run } from './sprite'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
@@ -11,10 +14,13 @@ const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   autoOpenedFor: '',
 })
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
+const bg = atom({ plugin: 'savvy-progress', key: 'bg' } as const, [])
+const launches = atom({ plugin: 'savvy-progress', key: 'launches' } as const, {})
 
 const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const PANE = 'savvy-agents'
+const BG_EVERY_MS = 5000
 const PHASES: readonly Phase[] = ['plan', 'design', 'delegate', 'review', 'close']
 const ACCENT = '#8f8cf4'
 const DONE = '#5fbf8f'
@@ -62,6 +68,11 @@ const STRINGS = {
     tasks: 'Tasks',
     review: 'Review',
     busy: 'running',
+    background: 'Background',
+    bgBusy: 'busy',
+    bgIdle: 'idle',
+    bgWaiting: 'waiting for you',
+    session: 'session',
   },
   ru: {
     pane: 'Агенты',
@@ -90,6 +101,11 @@ const STRINGS = {
     tasks: 'Задачи',
     review: 'Ревью',
     busy: 'в работе',
+    background: 'Фоновые',
+    bgBusy: 'работает',
+    bgIdle: 'простаивает',
+    bgWaiting: 'ждёт вас',
+    session: 'сессия',
   },
 } as const
 
@@ -404,8 +420,7 @@ const CLAY = '#D97757'
 const INK = '#1F1E1D'
 
 // `cls` puts a pixel in a named group: `bd` (the default) is the body and its
-// costume, `la`/`lb` the leg pairs, anything else a prop with its own motion.
-type Fill = (x: number, y: number, w: number, h: number, c: string, cls?: string) => void
+// costume, `la`/`lb` the leg pairs, anything else a prop with its own motion (type Fill, in sprite.ts).
 
 const stamp = (f: Fill, x: number, y: number, rows: string[], map: Record<string, string>, cls?: string): void =>
   rows.forEach((row, dy) => [...row].forEach((ch, dx) => map[ch] && f(x + dx, y + dy, 1, 1, map[ch] ?? '', cls)))
@@ -541,6 +556,29 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
 
 const costumeOf = (type: string): string => (type === 'Explore' ? 'explore' : tierOf(type))
 
+// --- terminal crabs: the same costumes, rasterized and shrunk (sprite.ts).
+
+// Crop to the union of all costumes, so every tier's crab is drawn at one scale.
+const sprites = new Map<string, Grid>()
+export const spriteOf = (costume: string): Grid => {
+  if (sprites.size === 0) {
+    const raw = Object.entries(COSTUMES).map(([k, draw]) => [k, rasterize(f => draw(f, colorOf(k)))] as const)
+    const box = boundsOf(raw.map(([, g]) => g))
+    for (const [k, g] of raw) sprites.set(k, downsample(g, box))
+  }
+  return sprites.get(costume) ?? sprites.get('other') ?? []
+}
+
+// The band is one line of text and short on room: the orchestrator alone, cropped to itself, 10 by 6 pixels.
+let mini: Grid | undefined
+const miniOrchestrator = (): Grid => {
+  if (!mini) {
+    const g = rasterize(f => COSTUMES.orchestrator?.(f, colorOf('orchestrator')))
+    mini = downsample(g, boundsOf([g]), 10, 6)
+  }
+  return mini
+}
+
 const CRAB_SCALE = 1.1
 
 // Body and props nest inside `bd` so a prop rides the bob and adds its own motion;
@@ -645,11 +683,44 @@ ${statusMark(W - 8, 16, 'planned', color)}
   )
 }
 
-const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnType<typeof totals>): string => {
+const WAITING = '#E0A030'
+
+const bgModel = (b: BgSession): string => [b.model ? (aliasLabel(b.model) ?? modelName(b.model)) : '—', b.effort].filter(Boolean).join(' · ')
+
+const bgStateText = (b: BgSession): string => (b.state === 'waiting' ? tr().bgWaiting : b.state === 'busy' ? tr().bgBusy : tr().bgIdle)
+
+// A session of its own, not a subagent: no cost, tokens or context (they are not visible from here).
+const bgSvg = (W: number, b: BgSession): string => {
+  const color = colorOf(b.tier)
+  const state = bgStateText(b)
+  const textW = W - 42 - 22
+  const branch = b.branch ? fitText(b.branch, 11, textW / 2) : ''
+  const tier = b.tier === 'other' ? tr().session : b.tier
+  const mark =
+    b.state === 'busy'
+      ? statusMark(W - 8, 16, 'running', color)
+      : b.state === 'waiting'
+        ? `<circle class="live" cx="${W - 8}" cy="16" r="3.5" fill="${WAITING}"/>`
+        : `<circle cx="${W - 8}" cy="16" r="3.5" fill="none" stroke="#9a9a96" stroke-width="1.4"/>`
+  return svg(
+    W,
+    46,
+    `${crab(0, 6, b.tier, b.state === 'idle', b.state === 'busy')}
+<text class="t" x="42" y="18" font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(b.name, 13, textW - textWidth(state, 11) - 8))}</text>
+<text class="s" x="${W - 22}" y="18" text-anchor="end" font-family="${FONT}" font-size="11"${b.state === 'waiting' ? ` fill="${WAITING}"` : ''}>${xml(state)}</text>
+<text x="42" y="34" font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(tier)}</tspan><tspan class="s">  ·  ${xml(fitText(bgModel(b), 11, Math.max(30, textW - textWidth(tier, 11) - textWidth(branch, 11) - 24)))}</tspan></text>
+${branch ? `<text class="m" x="${W - 22}" y="34" text-anchor="end" font-family="${FONT}" font-size="11">${xml(branch)}</text>` : ''}
+${mark}
+<line class="ln" x1="0" y1="45.5" x2="${W}" y2="45.5"/>`,
+  )
+}
+
+const compactSvg = (W: number, list: AgentRun[], planned: Planned[], sessions: BgSession[], t: ReturnType<typeof totals>): string => {
   const icons = [
     ...list.filter(a => a.status === 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: 'running', dim: false })),
     ...list.filter(a => a.status !== 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: a.status, dim: false })),
     ...planned.map(p => ({ k: p.tier in TIER_COLOR ? p.tier : 'other', c: colorOf(p.tier), s: 'planned', dim: true })),
+    ...sessions.map(b => ({ k: b.tier, c: colorOf(b.tier), s: b.state === 'busy' ? 'running' : 'idle', dim: b.state === 'idle' })),
   ]
   const fit = Math.max(1, Math.floor((W - 150) / 36))
   const shown = icons.slice(0, fit)
@@ -668,12 +739,59 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnTy
 
 // --- terminal drawing: the same rows in text.
 
+type TextTag = ReturnType<EngineInterface['ui']['resolve']>['Text']
+
+// A sprite as lines of text: each run of cells is one Text, the top pixel its color and the bottom its background.
+const crabLines = (Text: TextTag, grid: Grid, key: string) =>
+  toRuns(grid).map((line: Run[], y) => (
+    <Text key={`${key}-${y}`}>
+      {line.map((r, x) => (
+        <Text key={`${x}`} color={r.fg} backgroundColor={r.bg}>
+          {r.text}
+        </Text>
+      ))}
+    </Text>
+  ))
+
+const BG_GLYPH = { busy: '●', waiting: '▲', idle: '○' } as const
+
 const ctxBar = (pct: number, width: number): string => {
   const filled = Math.round((width * pct) / 100)
   return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled))
 }
 
 const STATUS_GLYPH: Record<string, string> = { running: '●', done: '✓', failed: '✗', planned: '◷' }
+
+// Background sessions: `claude agents --json` plus one `git worktree list` per poll, so the branch costs no
+// extra call per session. Runs only while the pane is open or a flow's bar is up (the clock in session.start).
+let isPolling = false
+
+async function pollBg($: EngineInterface): Promise<void> {
+  if (isPolling) return
+  isPolling = true
+  try {
+    const self = await $.session.id()
+    const repo = await $.session.repo()
+    const ran = await $.process.run(['claude', 'agents', '--json'], { timeoutMs: 10_000 })
+    if (ran.exitCode !== 0) return
+    const tree = repo ? await $.process.run(['git', '-C', repo.root, 'worktree', 'list', '--porcelain'], { timeoutMs: 5000 }).catch(() => null) : null
+    const trees = tree?.exitCode === 0 ? parseWorktrees(tree.stdout) : []
+    const launched = await read($, launches)
+    const list: BgSession[] = parseAgents(ran.stdout)
+      .filter(a => a.sessionId !== self && a.kind !== 'interactive' && isRelated(a, trees, launched))
+      .slice(0, 24)
+      .map(a => {
+        const l = launched[a.name.toLowerCase()]
+        return { id: a.sessionId, name: a.name, state: bgState(a), tier: tierFor(l), model: l?.model, effort: l?.effort, branch: branchOf(a, trees) }
+      })
+    const prev = await read($, bg)
+    if (JSON.stringify(prev) !== JSON.stringify(list)) await update($, bg, () => list)
+  } catch {
+    // The list stays as it was; the next poll tries again.
+  } finally {
+    isPolling = false
+  }
+}
 
 // Opens the agents pane, or closes it when it is up; true when it ends up open.
 async function togglePane($: EngineInterface): Promise<boolean> {
@@ -685,6 +803,7 @@ async function togglePane($: EngineInterface): Promise<boolean> {
   const at = await $.clock.now()
   await update($, now, () => at)
   await $.ui.open({ id: PANE, title: tr().pane })
+  await pollBg($)
   return true
 }
 
@@ -693,6 +812,7 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
   if (p.autoOpenedFor === key) return
   await update($, panel, prev => ({ ...prev, autoOpenedFor: key }))
   void $.ui.open({ id: PANE, title: tr().pane })
+  void pollBg($)
 }
 
 export const register: Register = (on, options) => {
@@ -751,6 +871,14 @@ export const register: Register = (on, options) => {
       description: 'Show or hide the panel of subagents: running, finished and planned, with model, context, cost and time',
     })
 
+    // Polls the background sessions, but only with the pane open or a flow's bar up: otherwise nothing runs.
+    $.clock.every(BG_EVERY_MS, () => {
+      void (async () => {
+        const f = await read($, flow)
+        if ((await $.ui.panes()).some(p => p.id === PANE) || (f && !f.isFinished)) await pollBg($)
+      })()
+    })
+
     // Ticks the running agents' clocks; quiet when nothing runs.
     $.clock.every(1000, () => {
       void (async () => {
@@ -794,6 +922,22 @@ export const register: Register = (on, options) => {
       }),
     )
     return { result: 'ok' }
+  })
+
+  // This session's own background launches: the only place their model, effort and agent can be learned.
+  on('tool.call', { tool: ['Bash', 'PowerShell'] }, async ($, e, next) => {
+    try {
+      const found = bgLaunches(String(e.command ?? '')).filter(l => l.name)
+      if (found.length) {
+        await update($, launches, all => ({
+          ...all,
+          ...Object.fromEntries(found.map(l => [(l.name ?? '').toLowerCase(), { model: l.model, effort: l.effort, agent: l.agent }])),
+        }))
+      }
+    } catch {
+      // Only a label for the panel: never worth failing the call.
+    }
+    return next(e)
   })
 
   // Safety net: worker launches move the faint layer even if the orchestrator forgets to report.
@@ -919,6 +1063,7 @@ export const register: Register = (on, options) => {
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
     const list = await read($, agents)
+    const sessions = await read($, bg)
     const f = await read($, flow)
     const p: Panel = await read($, panel)
     const at = Math.max(await read($, now), ...list.map(a => a.startedAt), 0)
@@ -946,7 +1091,7 @@ export const register: Register = (on, options) => {
         onPress={() => update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed }))}
       />
     )
-    const isEmpty = list.length === 0 && planned.length === 0
+    const isEmpty = list.length === 0 && planned.length === 0 && sessions.length === 0
     const summary = `≈${fmtCost(t.cost)}, ${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
@@ -961,7 +1106,7 @@ export const register: Register = (on, options) => {
       if (p.isCompact) {
         return (
           <Box flexDirection="column" gap={1}>
-            <Svg source={compactSvg(W, list, planned, t)} alt={`${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
+            <Svg source={compactSvg(W, list, planned, sessions, t)} alt={`${list.length + sessions.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
             {toggleCompact}
           </Box>
         )
@@ -980,6 +1125,10 @@ export const register: Register = (on, options) => {
             finished.map(a => (
               <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={66} />
             ))}
+          {sessions.length > 0 && section('h-bg', `${s.background} · ${sessions.length}`)}
+          {sessions.map(b => (
+            <Svg key={`bg-${b.id}`} source={bgSvg(W, b)} alt={`${b.name}: ${bgStateText(b)}`} width={W} height={46} />
+          ))}
           {planned.length > 0 && section('h-plan', `${s.planned} · ${planned.length}`)}
           {planned.map(pl => (
             <Svg key={`plan-${pl.n}`} source={plannedSvg(W, pl)} alt={`${pl.n}. ${pl.title}: ${s.isPlanned}`} width={W} height={46} />
@@ -990,7 +1139,53 @@ export const register: Register = (on, options) => {
 
     // Terminal: the same content in text rows.
     const cols = Math.max(24, e.props.bodyColumns || 40)
-    const barW = Math.max(6, Math.min(20, cols - 34))
+    // The crab takes SPRITE_W columns and a gap; on a narrow pane the old glyph stays.
+    const hasCrab = cols >= 40
+    const room = cols - (hasCrab ? SPRITE_W + 1 : 0)
+    const barW = Math.max(6, Math.min(20, room - 34))
+    const indent = hasCrab ? '' : '  '
+    const withCrab = (key: string, costume: string, body: JSX.Element) =>
+      hasCrab ? (
+        <Box key={key} flexDirection="row" gap={1} marginBottom={1}>
+          <Box flexDirection="column" flexShrink={0} width={SPRITE_W}>
+            {crabLines(Text, spriteOf(costume), key)}
+          </Box>
+          <Box flexDirection="column" justifyContent="center" width={room}>
+            {body}
+          </Box>
+        </Box>
+      ) : (
+        <Box key={key} flexDirection="column" marginBottom={1}>
+          {body}
+        </Box>
+      )
+    const bgRow = (b: BgSession) => {
+      const color = colorOf(b.tier)
+      return withCrab(
+        `bg-${b.id}`,
+        b.tier,
+        <>
+          <Box flexDirection="row" gap={1}>
+            {!hasCrab && <Text color={color}>▣</Text>}
+            <Text bold wrap="truncate-end">
+              {b.name}
+            </Text>
+            <Text color={b.state === 'waiting' ? 'warning' : b.state === 'busy' ? color : undefined} dimColor={b.state === 'idle'}>
+              {BG_GLYPH[b.state]}
+            </Text>
+          </Box>
+          <Text dimColor wrap="truncate-end">
+            {indent}
+            {b.tier === 'other' ? s.session : b.tier} · {bgModel(b)}
+          </Text>
+          <Text dimColor wrap="truncate-end">
+            {indent}
+            {bgStateText(b)}
+            {b.branch ? ` · ${b.branch}` : ''}
+          </Text>
+        </>,
+      )
+    }
     const row = (a: AgentRun) => {
       const tier = tierOf(a.type)
       const color = colorOf(tier)
@@ -998,29 +1193,31 @@ export const register: Register = (on, options) => {
       const progress = progressOf(a)
       const model = a.effort ? `${modelName(a.model)} · ${a.effort}` : modelName(a.model)
       const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' ' + a.stepNote : ''} · ` : ''
-      return (
-        <Box key={a.id} flexDirection="column" marginBottom={1}>
+      return withCrab(
+        a.id,
+        costumeOf(a.type),
+        <>
           <Box flexDirection="row" gap={1}>
-            <Text color={color}>▣</Text>
+            {!hasCrab && <Text color={color}>▣</Text>}
             <Text bold wrap="truncate-end">
               {a.description || a.type}
             </Text>
             <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : color}>{STATUS_GLYPH[a.status]}</Text>
           </Box>
           <Text dimColor wrap="truncate-end">
-            {'  '}
+            {indent}
             {tier === 'other' ? a.type : tier} · {model}
             {a.round > 1 ? ` · ${s.round} ${a.round}` : ''}
           </Text>
           <Text wrap="truncate-end">
-            {'  '}
+            {indent}
             {progress === null ? <Text dimColor>{ctxBar(ctx, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
             <Text dimColor>
               {' '}
               {steps}ctx {ctx}% · {fmtTokens(a.contextTokens)} ≈{fmtCost(a.costUsd)} {fmtTime(elapsed(a, at))}
             </Text>
           </Text>
-        </Box>
+        </>,
       )
     }
 
@@ -1037,6 +1234,11 @@ export const register: Register = (on, options) => {
         </Text>
         {p.isCompact ? (
           <Text wrap="truncate-end">
+            {sessions.map(b => (
+              <Text key={`bg-${b.id}`} color={colorOf(b.tier)}>
+                {BG_GLYPH[b.state]}{' '}
+              </Text>
+            ))}
             {[...running, ...finished].map(a => (
               <Text key={a.id} color={colorOf(tierOf(a.type))}>
                 {STATUS_GLYPH[a.status]}{' '}
@@ -1055,6 +1257,8 @@ export const register: Register = (on, options) => {
             {running.map(row)}
             {finished.length > 0 && toggleDone}
             {!p.isDoneCollapsed && finished.map(row)}
+            {sessions.length > 0 && <Text dimColor>{s.background} · {sessions.length}</Text>}
+            {sessions.map(bgRow)}
             {planned.length > 0 && <Text dimColor>{s.planned} · {planned.length}</Text>}
             {planned.map(pl => {
               const tier = pl.tier in TIER_COLOR ? pl.tier : 'other'
@@ -1084,7 +1288,7 @@ export const register: Register = (on, options) => {
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
     const list = await read($, agents)
-    const crew = list.length + plannedOf(f, list).length
+    const crew = list.length + plannedOf(f, list).length + (await read($, bg)).length
     const isWorking = list.some(a => a.status === 'running')
     const crewButton = (
       <Button key="savvy-agents" label={`×${crew}`} plain onPress={() => void togglePane($)} />
@@ -1100,7 +1304,7 @@ export const register: Register = (on, options) => {
       />
     )
 
-    if ('Svg' in ui) {
+    if (e.surface === 'desktop' && 'Svg' in ui) {
       const { Svg } = ui
       // About 8 CSS px per reported column; the rest is the count, the dismiss
       // and their gaps. No floor above the slot: a row wider than it would wrap.
@@ -1118,7 +1322,7 @@ export const register: Register = (on, options) => {
     const titleW = Math.max(8, Math.min(30, f.title.length + 2, Math.floor(cols / 3)))
     const width = Math.max(6, Math.min(40, cols - titleW - 32))
     return (
-      <Box flexDirection="row" gap={2}>
+      <Box flexDirection="row" gap={2} alignItems="center">
         <Box width={titleW} flexShrink={0}>
           <Text color={f.isFinished ? DONE : ACCENT}>● </Text>
           <Text wrap="truncate-end">{f.title}</Text>
@@ -1126,7 +1330,9 @@ export const register: Register = (on, options) => {
         <Text color={f.isFinished ? DONE : ACCENT}>{barText(f, width)}</Text>
         <Text bold>{label(f)}</Text>
         <Text dimColor>{percent}</Text>
-        <Text color={CLAY}>▣</Text>
+        <Box flexDirection="column" flexShrink={0}>
+          {crabLines(Text, miniOrchestrator(), 'band')}
+        </Box>
         {crewButton}
         {dismiss}
       </Box>
