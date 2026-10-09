@@ -1,0 +1,43 @@
+{
+  "name": "berkays-mods",
+  "owner": {
+    "name": "Berkay Orhan"
+  },
+  "plugins": [
+    {
+      "name": "limit-resume",
+      "source": "./plugins/limit-resume",
+      "description": "Resumes the session and its idle workers when a usage limit resets, and gives Claude the current 5h and weekly usage"
+    },
+    {
+      "name": "workers",
+      "source": "./plugins/workers",
+      "description": "A pane of the sessions this one orchestrates: state, branch, commits ahead, changed files, last message, who needs you"
+    },
+    {
+      "name": "identity-keeper",
+      "source": "./plugins/identity-keeper",
+      "description": "Keeps a session's name and role across restarts and compactions"
+    },
+    {
+      "name": "proof-gate",
+      "source": "./plugins/proof-gate",
+      "description": "Asks a worker that reports done for screenshots or video, sends the proof to you, and shows an approval band"
+    },
+    {
+      "name": "effort-gate",
+      "source": "./plugins/effort-gate",
+      "description": "Denies Opus at xhigh/max for subagents and background sessions unless the user said so, and background sessions without an explicit model"
+    },
+    {
+      "name": "route-ledger",
+      "source": "./plugins/route-ledger",
+      "description": "Records the model and effort of every subagent and background launch and how it went; /routing-review shows what to tune"
+    },
+    {
+      "name": "config-sync",
+      "source": "./plugins/config-sync",
+      "description": "Pulls the shared claude-config repo at session start, tells you when settings.shared.json changed, and applies it with /config-sync apply"
+    }
+  ]
+}
