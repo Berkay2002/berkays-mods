@@ -1,5 +1,5 @@
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
-import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
+import type { CommandRunInput, ConfigSetInput, ModelCompleteResult, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
 import { fmtDuration, freshState, parseDuration, resetForClear, seedFromResume } from '../hooks/register'
@@ -31,10 +31,12 @@ const prompt = (text: string): PromptSubmitInput => ({ text, wait: false, origin
 const themeChange = (value: string): ConfigSetInput => ({ key: 'theme', value, previous: 'dark', provider: { plugin: 'engine', tier: 'core' }, origin: { kind: 'composer' } })
 
 type ForkAnswer = null | ModelForkResult | { read: number; write: number; out?: number; input?: number }
+// The judge's script: the text Haiku answers with, a failure result, or 'throw' for a call the engine refuses.
+type JudgeAnswer = string | ModelCompleteResult | 'throw'
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; fresh?: boolean; commands?: string[]; live?: { tokens?: number }; sid?: string; model?: string; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { judge?: JudgeAnswer[]; store?: Map<string, unknown>; fresh?: boolean; commands?: string[]; live?: { tokens?: number }; sid?: string; model?: string; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string } = {}) {
   if (opts.store) {
     const store = opts.store
     // berkays-mods: a store without the always key reads as off, as upstream's tests assume.
@@ -77,7 +79,16 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     const value: ModelForkResult = { isAnswered: true, text: 'warm', usage: { input_tokens: a.input ?? 2, output_tokens: a.out ?? 1, cache_read_input_tokens: a.read, cache_creation_input_tokens: a.write } }
     return { value }
   })
-  return { forks, status, logs, entered, reads }
+  // berkays-mods: with nothing scripted the judge answers WARM, which pings as upstream does.
+  const asked: Array<{ model: string; system?: string; prompt: string }> = []
+  on('model.complete', ($, e) => {
+    asked.push({ model: e.model, system: e.system, prompt: e.prompt })
+    const a = opts.judge?.shift() ?? 'WARM work is still in progress'
+    if (a === 'throw') throw new Error('model blocked')
+    if (typeof a !== 'string') return { value: a }
+    return { value: { isAnswered: true, text: a, usage: { input_tokens: 400, output_tokens: 12, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }
+  })
+  return { forks, status, logs, entered, reads, asked }
 }
 
 const warm: ForkAnswer = { read: 200000, write: 0 }
@@ -761,6 +772,145 @@ describe('keepwarm', () => {
     await clock.advance(40 * MIN)
     await $.turn.complete(turn({ agentId: 'a1' }))
     await clock.advance(10 * MIN)
+    expect(w.forks.length).toBe(1)
+  })
+})
+
+// berkays-mods: before the first ping of an idle stretch, Haiku says whether the work is finished.
+describe('keepwarm judge', () => {
+  const DONE = 'Done. The fix is merged and every test passes.'
+  const open = async ($: Parameters<Parameters<typeof test>[1]>[0], reply: string, text = 'fix the login bug') => {
+    await $.session.start(session)
+    await $.command.run(run('keepwarm', '6h'))
+    await $.prompt.submit(prompt(text))
+    await $.turn.complete(turn({ answer: reply }))
+  }
+
+  test('a done-looking session is judged COLD: no ping this stretch, and the status says paused', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    const w = world(on, [warm, warm], { store, judge: ['COLD task reported done, nothing pending'] })
+    await open($, DONE)
+    await clock.advance(50 * MIN)
+    expect(w.asked.length).toBe(1)
+    expect(w.forks.length).toBe(0)
+    expect(w.status.at(-1)).toBe('keepwarm paused: work looks done (task reported done, nothing pending)')
+    expect(w.logs.at(-1)).toBe('keepwarm paused: work looks done (task reported done, nothing pending)')
+    await clock.advance(2 * HOUR)
+    expect(w.asked.length).toBe(1)
+    expect(w.forks.length).toBe(0)
+    // The window is kept, and the texts are in memory only.
+    expect(store.get('deadline:S1')).toBe(START + 6 * HOUR)
+    expect(JSON.stringify([...store])).not.toMatch(/login bug|merged/)
+    expect(w.logs.join('\n')).not.toMatch(/login bug|merged/)
+  })
+
+  test('the judge gets a small digest, not the transcript', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm])
+    const long = 'p'.repeat(700)
+    await open($, 'a'.repeat(1300) + 'THE END', long)
+    await $.turn.complete(turn({ agentId: 'worker', answer: 'SUBAGENT TEXT' }))
+    await clock.advance(50 * MIN)
+    const ask = w.asked[0]
+    expect(ask?.model).toBe('haiku')
+    expect(ask?.system).toMatch(/WARM/)
+    expect(ask?.prompt).toContain(`<last_user_prompt>${'p'.repeat(600)}</last_user_prompt>`)
+    expect(ask?.prompt).not.toContain('p'.repeat(601))
+    expect(ask?.prompt).toMatch(/<last_assistant_reply>a{1193}THE END<\/last_assistant_reply>/)
+    expect(ask?.prompt).toContain('<idle_minutes>50</idle_minutes>')
+    expect(ask?.prompt).toContain('<context_tokens>200502</context_tokens>')
+    expect(ask?.prompt).not.toContain('SUBAGENT')
+  })
+
+  test('a session with work left is judged WARM and pinged as before, once asked per stretch', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm], { judge: ['WARM still fixing, tests failing'] })
+    await open($, 'I fixed the parser; the lexer tests still fail. Shall I continue?')
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(2)
+    expect(w.asked.length).toBe(1)
+    expect(w.status.at(-1)).toMatch(/last ping read 200k/)
+  })
+
+  for (const [name, answer] of [
+    ['garbage', 'I think the session is probably fine'],
+    ['an api error', { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: usage() }],
+    ['an empty reply', { isAnswered: false, reason: 'empty-reply', usage: usage() }],
+    ['a refused call', 'throw'],
+  ] as Array<[string, JudgeAnswer]>) {
+    test(`${name} from the judge fails open to the ping`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [warm, warm], { judge: [answer, 'COLD never asked twice'] })
+      await open($, DONE)
+      await clock.advance(50 * MIN)
+      expect(w.forks.length).toBe(1)
+      await clock.advance(50 * MIN)
+      expect(w.forks.length).toBe(2)
+      expect(w.asked.length).toBe(1)
+    })
+  }
+
+  test('the next main-session turn resets the verdict, so the next stretch is judged again', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm], { judge: ['COLD all done', 'WARM tests still red'] })
+    await open($, DONE)
+    await clock.advance(50 * MIN)
+    expect(w.asked.length).toBe(1)
+    expect(w.forks.length).toBe(0)
+    await $.turn.complete(turn({ agentId: 'worker' }))
+    await clock.advance(HOUR)
+    expect(w.asked.length).toBe(1)
+    await $.prompt.submit(prompt('now fix the signup bug'))
+    await $.turn.complete(turn({ answer: 'Started on signup; one test is still red.' }))
+    expect(w.status.at(-1)).toMatch(/ping in 50m/)
+    await clock.advance(50 * MIN)
+    expect(w.asked.length).toBe(2)
+    expect(w.asked[1]?.prompt).toContain('now fix the signup bug')
+    expect(w.forks.length).toBe(1)
+  })
+
+  test('/keepwarm judge off never asks and pings as before; on turns it back on, and the card shows it', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    const w = world(on, [warm, warm], { store, judge: ['COLD all done'] })
+    await $.session.start(session)
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/judge       on, Haiku checks once per idle stretch/)
+    expect((await $.command.run(run('keepwarm', 'judge off'))).text).toMatch(/^keepwarm judge off/)
+    expect(store.get('judge')).toBe(false)
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/judge       off \(\/keepwarm judge on\)/)
+    await $.command.run(run('keepwarm', '6h'))
+    await $.prompt.submit(prompt('fix the login bug'))
+    await $.turn.complete(turn({ answer: DONE }))
+    await clock.advance(50 * MIN)
+    expect(w.asked.length).toBe(0)
+    expect(w.forks.length).toBe(1)
+    expect((await $.command.run(run('keepwarm', 'judge maybe'))).text).toMatch(/takes on or off; it is off/)
+    expect((await $.command.run(run('keepwarm', 'judge on'))).text).toMatch(/^keepwarm judge on/)
+    expect(store.get('judge')).toBe(true)
+  })
+
+  test('switching the judge off while paused resumes the pings', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm], { judge: ['COLD all done'] })
+    await open($, DONE)
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(0)
+    await $.command.run(run('keepwarm', 'judge off'))
+    expect(w.status.at(-1)).not.toMatch(/paused/)
+    await clock.advance(MIN)
+    expect(w.forks.length).toBe(1)
+  })
+
+  test('an empty digest, as after a resume, skips the judge and pings', async ($, on) => {
+    const clock = mock.clock(on, { now: 10 * HOUR })
+    const w = world(on, [warm], { store: new Map<string, unknown>([['deadline:S1', 16 * HOUR]]) })
+    await $.session.start(session)
+    await $.classic.SessionStart({ source: 'resume', seconds_since_last_response: 30 * 60, context_tokens: 200000 })
+    await clock.advance(20 * MIN)
+    expect(w.asked.length).toBe(0)
     expect(w.forks.length).toBe(1)
   })
 })

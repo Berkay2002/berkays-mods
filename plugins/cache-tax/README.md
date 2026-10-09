@@ -10,8 +10,13 @@
 >   with nobody there to resend it. `/cache-tax guard refuse` restores upstream behaviour.
 > - **keepwarm is always on**: every session starts with an **8-hour** window (a working day), and a paid cold write
 >   also arms 8 hours (upstream: off, 6h and 3h). `/keepwarm off` switches it off for good on this device;
->   `/keepwarm always` turns it back on. Each running session pings separately, at most once per 50 idle minutes. Install it from this
-> marketplace (`claude plugin install cache-tax@berkays-mods`), not with the commands below.
+>   `/keepwarm always` turns it back on. Each running session pings separately, at most once per 50 idle minutes.
+> - a **keepwarm judge**: before the first ping of each idle stretch, one small Haiku call (a digest of your last prompt and
+>   the last reply, never the transcript; about one cheap call per idle stretch) decides whether the work looks finished.
+>   If so, the stretch is left to go cold (`keepwarm paused: work looks done (...)`) and the next turn resumes the schedule;
+>   any doubt, error or timeout pings as before. `/keepwarm judge off` disables it (on by default).
+>
+> Install it from this marketplace (`claude plugin install cache-tax@berkays-mods`), not with the commands below.
 
 
 **Keep Claude Code's prompt cache warm during breaks.**
@@ -45,6 +50,8 @@ In a warm session, run `/keepwarm` to arm eight hours. Use `/keepwarm 90m` for a
 
 **Before a break:** `/keepwarm` arms a bounded window. After 50 idle minutes, a timer inside Claude Code sends one tool-less fork over the session's transcript. It reads usage after every ping and stops if reads are zero or writes reach 10% of reads. There is no background transcript-polling loop.
 
+**The judge (this copy):** before the first ping of an idle stretch, a small Haiku call reads a digest (your last prompt trimmed to 600 characters, the last reply trimmed to 1,200, the idle minutes and the context size) and answers `WARM` or `COLD` with a reason. `COLD` means the work looks finished, nothing pending and no question waiting on you: that stretch is not pinged (the window and the always setting stay), the status reads `keepwarm paused: work looks done (<reason>)`, and your next turn resumes the normal schedule. `WARM`, an unreadable answer, an error or a timeout pings as before. One verdict per stretch; after a resume there is no digest yet, so the first stretch is pinged without asking. `/cache-tax` shows the switch.
+
 **When you return cold:** for a context of at least 50,000 tokens, the guard shows the estimated rewrite price when its one-hour clock says cold, and sends. With `/cache-tax guard refuse` it drops your ordinary message once instead: resend to continue, or `/clear` and start from a note.
 
 A detected cold write automatically arms at least eight hours of keepwarm. `/cache-tax` shows the current cache estimate, warming window and this session's cold-write tally.
@@ -73,6 +80,7 @@ New to caching? [Anthropic explains how Claude Code uses it](https://code.claude
     /keepwarm 6h every 2m   pinging every two minutes; a testing knob, floor 1m, forgotten after this window
     /keepwarm status        the warming window, next ping and last receipt
     /keepwarm off           stop, forget the window, and turn always off
+    /keepwarm judge on|off  ask Haiku once per idle stretch whether the work is done before pinging (this copy; default on)
     /cache-tax              the card
     /cache-tax guard warn   show the price and send (this copy's default)
     /cache-tax guard refuse drop a cold send once, the resend goes through (upstream's default)
@@ -100,17 +108,17 @@ The hook and the mod share a name and a job, so having both means two guards on 
 Validated on Claude Code 2.1.289:
 
     ❯ ./register.ts hooks: config.set{key=theme}, ui.render{component=AbovePrompt}, session.start, classic.SessionStart, command.run{command=keepwarm}, command.run{command=cache-tax}, prompt.submit, turn.step, turn.complete, session.compact
-    ❯ ./register.ts calls: $.clock.after (via arm), $.clock.now, $.command.list, $.command.register, $.config.list, $.env.get, $.model.fork (via ping), $.session.id, $.session.model, $.session.usage, $.store.delete (via prune, startWindow, stop), $.store.get, $.store.set, $.ui.invalidate, $.ui.log, $.ui.resolve, $.ui.status
+    ❯ ./register.ts calls: $.clock.after (via arm), $.clock.now, $.command.list, $.command.register, $.config.list, $.env.get, $.model.complete (via judge), $.model.fork (via ping), $.session.id, $.session.model, $.session.usage, $.store.delete (via prune, startWindow, stop), $.store.get, $.store.set, $.ui.invalidate, $.ui.log, $.ui.resolve, $.ui.status
     ❯ ./register.ts env reads: NO_COLOR
 
 Reach L2, drives Claude. Sees every prompt you type, every model request's timing and every answer's token counts.
 
     Threat model for cache-tax (reach L2, drives Claude)
-    1. Reads:    of each prompt, whether it starts with a slash and nothing else (the text is passed on untouched, never kept, never logged); the time; the token counts and model id the engine already holds on turn.complete and on the fork's reply; the resume fields Claude Code computes for settings hooks; the command list, the session id and, when a resumed session's fields carry no model id, the session's model once at start; from its own $.store, the keepwarm deadline and the ping period keyed by session id, plus the global always switch and guard mode
-    2. Runs:     one $.model.fork per idle stretch inside a keepwarm window, one per ping period (50 minutes unless the testing knob set it, floor 1 minute), never outside the window, never onto a cache the mod already knows is cold, never after a readback that read nothing or wrote at least a tenth of what it read
-    3. Sends:    nothing leaves the machine except the fork, an API request over the session's own transcript with a fixed one-line prompt
-    4. Persists: in $.store, the keepwarm deadline and the ping period under this session's id, and the always switch and the guard mode for every session; a window that has ended is deleted at stop and at this session's next start, together with the bare keys of a 2.1.0 store; another session's keys are never deleted here, because a read followed by a delete cannot be made atomic against that session renewing its window, so a session that armed keepwarm and never came back leaves two small keys behind; the session's cold-write tally lives in memory and dies with the session
-    5. Hostile input: the only text it parses is the argument of its two commands, matched against a duration regex and five literals; of the prompt text only the first non-blank character is inspected, for a slash; tool results and files never reach a branch; the fork's prompt is a constant, so nothing crafted can be sent through it; a refusal only ever drops the user's own message, and the resend is unconditional; if a hook throws, the engine skips it and the message enters unguarded, with one dim line
+    1. Reads:    of each prompt, whether it starts with a slash and, for the keepwarm judge (berkays-mods), the text of your own typed or bridged prompts (the text is passed on untouched, kept only in memory trimmed to its first 600 characters, never stored, never logged); the final text of each main-session answer on turn.complete, likewise only in memory, trimmed to its last 1,200 characters (subagent turns are ignored); the time; the token counts and model id the engine already holds on turn.complete and on the fork's reply; the resume fields Claude Code computes for settings hooks; the command list, the session id and, when a resumed session's fields carry no model id, the session's model once at start; from its own $.store, the keepwarm deadline and the ping period keyed by session id, plus the global always switch, guard mode and judge switch
+    2. Runs:     with the judge on, one $.model.complete to Haiku per idle stretch, before its first ping (no history, 60 output tokens, 30 s timeout); one $.model.fork per idle stretch inside a keepwarm window, one per ping period (50 minutes unless the testing knob set it, floor 1 minute), never outside the window, never onto a cache the mod already knows is cold, never after a readback that read nothing or wrote at least a tenth of what it read
+    3. Sends:    nothing leaves the machine except the fork, an API request over the session's own transcript with a fixed one-line prompt, and (judge on) the judge's digest to Haiku: your last prompt (600 characters), the last reply (1,200), the idle minutes and the context size, never the transcript or tool results
+    4. Persists: in $.store, the keepwarm deadline and the ping period under this session's id, and the always switch, the guard mode and the judge switch for every session (the digest texts and the verdict are never stored); a window that has ended is deleted at stop and at this session's next start, together with the bare keys of a 2.1.0 store; another session's keys are never deleted here, because a read followed by a delete cannot be made atomic against that session renewing its window, so a session that armed keepwarm and never came back leaves two small keys behind; the session's cold-write tally lives in memory and dies with the session
+    5. Hostile input: the only text it parses is the argument of its two commands, matched against a duration regex and a few literals; of the prompt text only the first non-blank character is inspected, for a slash, apart from the judge's digest, which is sent to Haiku inside delimiter tags under a system prompt that calls it data; the judge's answer is read only for its first word (WARM or COLD) and a reason of at most 100 characters shown in the status, so a crafted prompt or reply can at worst make the judge say COLD and pause the pings for one stretch; tool results and files never reach a branch; the fork's prompt is a constant, so nothing crafted can be sent through it; a refusal only ever drops the user's own message, and the resend is unconditional; if a hook throws, the engine skips it and the message enters unguarded, with one dim line
 
 ## Cost and the plan-limit question
 
@@ -153,11 +161,12 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [56 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [68 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Guard:** refuse once and resend, warn mode, slash commands, small contexts, resume seeding and cold-write scoring.
 - **Warming:** command defaults, always/off, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.
 - **Session state:** isolated store keys, restored windows, legacy cleanup, clear/compaction resets and subagent isolation.
+- **Judge:** a done-looking session is left unpinged, work left pings, errors and garbage fail open, a new turn resets the verdict, the switch and the digest.
 - **Pricing and display:** model matching, output and uncached input costs, context counts, duration formatting and the read-only break-even figure.
 - **Indicator:** terminal images and desktop SVGs, theme selection, warm/cold transitions, resume, compaction, clear, expiry, surveys, other mods' content, text alternatives and `NO_COLOR` fallback.
 - **Preferences:** one read per session, immediate theme updates, denied changes and the effective theme returned by the settings writer.
