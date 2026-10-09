@@ -1,0 +1,8 @@
+{
+  "name": "config-sync",
+  "description": "Pulls the shared claude-config repo at session start, tells you when settings.shared.json changed, and applies it with /config-sync apply",
+  "author": {
+    "name": "Berkay Orhan"
+  },
+  "repository": "https://github.com/Berkay2002/berkays-mods"
+}
