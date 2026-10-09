@@ -1,0 +1,9 @@
+{
+  "name": "identity-keeper",
+  "description": "Keeps a session's name and role across restarts and compactions",
+  "author": {
+    "name": "Berkay Orhan"
+  },
+  "repository": "https://github.com/Berkay2002/berkays-mods",
+  "types": "./types/index.d.ts"
+}
