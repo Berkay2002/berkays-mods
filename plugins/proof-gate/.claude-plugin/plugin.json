@@ -1,0 +1,9 @@
+{
+  "name": "proof-gate",
+  "description": "Asks a worker that reports done for screenshots or video, sends the proof to you, and shows an approval band",
+  "author": {
+    "name": "Berkay Orhan"
+  },
+  "repository": "https://github.com/Berkay2002/berkays-mods",
+  "types": "./types/index.d.ts"
+}
