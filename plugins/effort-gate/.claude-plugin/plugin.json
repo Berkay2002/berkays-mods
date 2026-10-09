@@ -1,0 +1,9 @@
+{
+  "name": "effort-gate",
+  "description": "Denies a subagent or background session running Opus at xhigh or max effort unless the user said so",
+  "author": {
+    "name": "Berkay Orhan"
+  },
+  "repository": "https://github.com/Berkay2002/berkays-mods",
+  "types": "./types/index.d.ts"
+}
