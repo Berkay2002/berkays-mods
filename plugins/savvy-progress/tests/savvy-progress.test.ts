@@ -26,28 +26,29 @@ describe('claude-config crew', () => {
 describe('terminal crabs', () => {
   const TIERS = ['scout', 'builder', 'reviewer', 'orchestrator', 'other', 'fable', 'heavy', 'careful', 'medium', 'light', 'explore']
 
-  test('every costume downsamples to the same fixed grid, and the grids differ', async () => {
-    const grids = TIERS.map(t => spriteOf(t))
-    for (const g of grids) {
-      expect(g.length).toBe(SPRITE_H)
-      for (const row of g) expect(row.length).toBe(SPRITE_W)
-    }
-    expect(new Set(grids.map(g => JSON.stringify(g))).size).toBe(TIERS.length)
-    // The crab is drawn, not blank; a builder's hat reaches above the body of a plain crab.
-    expect(toText(spriteOf('other')).trim().length).toBeGreaterThan(12)
-    expect(toText(spriteOf('builder')).split('\n')[0]!.trim()).not.toBe('')
-    expect(toText(spriteOf('other')).split('\n')[0]!.trim()).toBe('')
+  test('every tier is Clawd, three lines of SPRITE_W columns, and the crew hold props of their own', async () => {
+    for (const t of TIERS)
+      for (const f of [0, 1]) {
+        const lines = toText(spriteOf(t, f)).split('\n')
+        expect(lines).toHaveLength(SPRITE_H)
+        for (const l of lines) expect(l.length).toBe(SPRITE_W)
+        expect(lines[1]!.startsWith('▝▜██████▀')).toBe(true)
+      }
+    const crew = ['scout', 'builder', 'reviewer', 'orchestrator', 'other'].map(t => toText(spriteOf(t)))
+    expect(new Set(crew).size).toBe(5)
+    // Other holds nothing; a prop is drawn in its tier's color, the body in Claude orange.
+    expect(toText(spriteOf('other')).split('\n').every(l => l.endsWith('  '))).toBe(true)
+    expect(spriteOf('builder')[0]).toEqual([
+      { text: ' ▐▛███▛█ ', fg: '#D97757' },
+      { text: '▜▀', fg: '#E07B39' },
+    ])
   })
 
-  test('the sprite is 6 pixel rows, three lines like the text beside it', async () => {
-    expect(SPRITE_H).toBe(6)
-    expect(toText(spriteOf('builder')).split('\n')).toHaveLength(3)
-  })
-
-  test('every tier has a second frame that differs from the first', async () => {
+  test('every tier has a second frame: the feet walk', async () => {
     for (const t of TIERS) {
-      expect(spriteOf(t, 1).length).toBe(SPRITE_H)
-      expect(JSON.stringify(spriteOf(t, 1))).not.toBe(JSON.stringify(spriteOf(t, 0)))
+      const [a, b] = [toText(spriteOf(t, 0)), toText(spriteOf(t, 1))]
+      expect(b).not.toBe(a)
+      expect(b.split('\n')[2]).not.toBe(a.split('\n')[2])
     }
   })
 })
@@ -131,16 +132,15 @@ describe('agents panel', () => {
     expect(all).toContain('busy · feat-x')
     expect(all).toContain('x')
     expect(all).not.toContain('unrelated')
-    // The crab is drawn in half-blocks: the builder's hat color as the foreground, a second pixel row as the background.
-    expect(all).toMatch(/[▀▄█]/)
-    expect(nodes.some(t => (t.props as { color?: string }).color === '#e07b39')).toBe(true)
-    expect(nodes.some(t => (t.props as { backgroundColor?: string }).backgroundColor !== undefined)).toBe(true)
+    // The crab is Clawd in quadrant blocks, with the builder's hammer in the builder's color.
+    expect(all).toContain('▝▜██████▀')
+    expect(nodes.some(t => (t.props as { color?: string }).color === '#E07B39')).toBe(true)
     await ui.unmount()
   })
 
-  // The pane's glyphs and colors, as drawn now: the crab is half-block Text runs.
+  // The pane's glyphs and colors, as drawn now: the crab is colored Text runs.
   const crabs = async (ui: { findAll: (q: { type: string }) => Promise<{ text: string; props: unknown }[]> }) =>
-    JSON.stringify((await ui.findAll({ type: 'Text' })).map(t => [t.text, (t.props as { color?: string }).color, (t.props as { backgroundColor?: string }).backgroundColor]))
+    JSON.stringify((await ui.findAll({ type: 'Text' })).map(t => [t.text, (t.props as { color?: string }).color]))
 
   test('a busy session animates while the pane is open', async ($, on) => {
     const clock = world(on)
@@ -209,7 +209,7 @@ describe('agents panel', () => {
     })
     expect((await ui.find({ key: 'savvy-agents' }))?.text).toBe('×1')
     const nodes = await ui.findAll({ type: 'Text' })
-    expect(nodes.some(t => t.text === '▄▄▄▄' || /[▀▄█]{3}/.test(t.text))).toBe(true)
+    expect(nodes.some(t => t.text.includes('▝▜██████▀'))).toBe(true)
     await ui.unmount()
   })
 

@@ -3,8 +3,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentRun, BgSession, Flow, Panel, Phase, PlannedTask } from '../types'
 import { aliasLabel, bgLaunches, bgState, branchOf, isRelated, parseAgents, parseWorktrees, tierFor } from './bg'
-import { SPRITE_W, boundsOf, downsample, rasterize, toRuns } from './sprite'
-import type { Fill, Grid, Run } from './sprite'
+import { SPRITE_W, clawd } from './sprite'
+import type { Fill, Run } from './sprite'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
@@ -558,56 +558,9 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
 
 const costumeOf = (type: string): string => (type === 'Explore' ? 'explore' : tierOf(type))
 
-// --- terminal crabs: the same costumes, rasterized and shrunk (sprite.ts).
+// --- terminal crabs: Clawd with the tier's prop (sprite.ts).
 
-// Frame 1 of a running crab: where each animated part (its `cls`) moves, in grid pixels; null hides it.
-// Parts not listed stay. The SVG's own motion (CRAB_CSS) needs a compositor; here it is two poses.
-type Move = [dx: number, dy: number] | null
-const POSE: Record<string, Record<string, Move>> = {
-  fable: { bd: [0, 3], ant: [0, 3], star: [0, 3] },
-  heavy: { it: [-3, 3], gl: null },
-  careful: { it: [2, 3] },
-  medium: { pan: [0, 2], egg: [0, -5] },
-  light: { flag: [0, 2], la: [0, -2], lb: [0, 2] },
-  explore: { it: [-3, 2] },
-  scout: { it: [-3, 0] },
-  builder: { it: [-2, 5] },
-  reviewer: { ck: null, tas: [3, 0] },
-  orchestrator: { it: [-3, 3] },
-  other: { bd: [0, 3], la: [0, -2], lb: [0, 2] },
-}
-
-// Crop to the union of all costumes, so every tier's crab is drawn at one scale; cached per costume and frame.
-const sprites = new Map<string, Grid>()
-export const spriteOf = (costume: string, frame = 0): Grid => {
-  if (sprites.size === 0) {
-    const draw = (k: string, f: number) =>
-      rasterize(put =>
-        COSTUMES[k]?.((x, y, w, h, c, cls = 'bd') => {
-          const m = f ? POSE[k]?.[cls] : [0, 0]
-          if (m !== null) put(x + (m?.[0] ?? 0), y + (m?.[1] ?? 0), w, h, c, cls)
-        }, colorOf(k)),
-      )
-    const raw = Object.keys(COSTUMES).map(k => [k, draw(k, 0), draw(k, 1)] as const)
-    const box = boundsOf(raw.map(([, g]) => g))
-    for (const [k, a, b] of raw) {
-      sprites.set(`${k}:0`, downsample(a, box))
-      sprites.set(`${k}:1`, downsample(b, box))
-    }
-  }
-  const k = costume in COSTUMES ? costume : 'other'
-  return sprites.get(`${k}:${frame}`) ?? []
-}
-
-// The band is one line of text and short on room: the orchestrator alone, cropped to itself, 10 by 6 pixels.
-let mini: Grid | undefined
-const miniOrchestrator = (): Grid => {
-  if (!mini) {
-    const g = rasterize(f => COSTUMES.orchestrator?.(f, colorOf('orchestrator')))
-    mini = downsample(g, boundsOf([g]), 10, 6)
-  }
-  return mini
-}
+export const spriteOf = (costume: string, frame = 0): Run[][] => clawd(costume, colorOf(costume), frame)
 
 const CRAB_SCALE = 1.1
 
@@ -771,12 +724,12 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], sessions: B
 
 type TextTag = ReturnType<EngineInterface['ui']['resolve']>['Text']
 
-// A sprite as lines of text: each run of cells is one Text, the top pixel its color and the bottom its background.
-const crabLines = (Text: TextTag, grid: Grid, key: string) =>
-  toRuns(grid).map((line: Run[], y) => (
+// A sprite as lines of text: each run of cells is one Text in its color.
+const crabLines = (Text: TextTag, lines: Run[][], key: string) =>
+  lines.map((line, y) => (
     <Text key={`${key}-${y}`}>
       {line.map((r, x) => (
-        <Text key={`${x}`} color={r.fg} backgroundColor={r.bg}>
+        <Text key={`${x}`} color={r.fg}>
           {r.text}
         </Text>
       ))}
@@ -1371,7 +1324,7 @@ export const register: Register = (on, options) => {
         <Text bold>{label(f)}</Text>
         <Text dimColor>{percent}</Text>
         <Box flexDirection="column" flexShrink={0}>
-          {crabLines(Text, miniOrchestrator(), 'band')}
+          {crabLines(Text, spriteOf('orchestrator'), 'band')}
         </Box>
         {crewButton}
         {dismiss}
