@@ -15,6 +15,10 @@
 >   the last reply, never the transcript; about one cheap call per idle stretch) decides whether the work looks finished.
 >   If so, the stretch is left to go cold (`keepwarm paused: work looks done (...)`) and the next turn resumes the schedule;
 >   any doubt, error or timeout pings as before. `/keepwarm judge off` disables it (on by default).
+> - an **idle cap**: pings stop once 3 hours have passed since your last main-session turn (`keepwarm resting: idle 3h00m,
+>   next turn resumes`); the window and `always` stay as they are, and your next turn resumes the schedule.
+> - a **weekly usage pause**: before each ping the weekly limit is read, and at 75% or more the ping (and the judge call) is
+>   skipped (`keepwarm paused: weekly usage 76%`); it re-checks at the next ping time and resumes by itself. No reading pings as usual.
 >
 > Install it from this marketplace (`claude plugin install cache-tax@berkays-mods`), not with the commands below.
 

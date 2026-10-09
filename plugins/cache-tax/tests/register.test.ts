@@ -36,7 +36,7 @@ type JudgeAnswer = string | ModelCompleteResult | 'throw'
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { judge?: JudgeAnswer[]; store?: Map<string, unknown>; fresh?: boolean; commands?: string[]; live?: { tokens?: number }; sid?: string; model?: string; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { judge?: JudgeAnswer[]; store?: Map<string, unknown>; fresh?: boolean; commands?: string[]; live?: { tokens?: number }; weekly?: { pct: number | null; throws?: boolean }; sid?: string; model?: string; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string } = {}) {
   if (opts.store) {
     const store = opts.store
     // berkays-mods: a store without the always key reads as off, as upstream's tests assume.
@@ -60,7 +60,7 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { judge?: JudgeAnswer[];
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: opts.sid ?? 'S1' }))
   on('session.model', () => ({ value: opts.model ?? 'claude-fable-5-1' }))
-  on('session.usage', () => ({ value: { startedAt: START, context: { window: 1000000, tokens: opts.live?.tokens }, rateLimits: [] } }))
+  on('session.usage', () => ({ value: { startedAt: START, context: { window: 1000000, tokens: opts.live?.tokens }, rateLimits: opts.weekly?.pct == null ? [] : [{ kind: 'seven_day', percentUsed: opts.weekly.pct, resetsAt: '2026-10-16T00:00:00Z' }] } }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('command.list', () => ({ value: (opts.commands ?? []).map(name => ({ name, description: '', source: 'plugin' as const })) }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
@@ -988,5 +988,86 @@ describe('store per session', () => {
     world(on, [], { store, sid: 'mine' })
     await $.session.start(session)
     expect([...store.keys()]).toEqual(['deadline:other', 'every:other'])
+  })
+})
+
+describe('keepwarm limits', () => {
+  const open = async ($: Parameters<Parameters<typeof test>[1]>[0]) => {
+    await $.session.start(session)
+    await $.command.run(run('keepwarm', '8h'))
+    await $.prompt.submit(prompt('fix the login bug'))
+    await $.turn.complete(turn())
+  }
+
+  test('idle cap: pings at 50m, 100m, 150m, then rest at 3h with the window and always untouched; a turn resumes', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    const w = world(on, [warm, warm, warm, warm, warm], { store })
+    await open($)
+    for (const n of [1, 2, 3]) {
+      await clock.advance(50 * MIN)
+      expect(w.forks.length).toBe(n)
+    }
+    await clock.advance(30 * MIN)
+    expect(w.forks.length).toBe(3)
+    expect(w.logs.at(-1)).toBe('keepwarm resting: idle 3h00m, next turn resumes')
+    expect(w.status.at(-1)).toBe('keepwarm resting: idle 3h00m, next turn resumes')
+    await clock.advance(3 * HOUR)
+    expect(w.forks.length).toBe(3)
+    expect(store.get('deadline:S1')).toBe(START + 8 * HOUR)
+    expect(store.has('always')).toBe(false)
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/idle cap    3h00m per idle stretch/)
+    await $.turn.complete(turn())
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(4)
+  })
+
+  test('a subagent turn does not reset the idle clock', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm, warm, warm, warm])
+    await open($)
+    await clock.advance(100 * MIN)
+    await $.turn.complete(turn({ agentId: 'worker' }))
+    await clock.advance(50 * MIN)
+    await clock.advance(30 * MIN)
+    expect(w.forks.length).toBe(3)
+    expect(w.logs.at(-1)).toBe('keepwarm resting: idle 3h00m, next turn resumes')
+  })
+
+  test('weekly usage at 80% pings nothing and never asks the judge; the status says paused', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm], { weekly: { pct: 80 } })
+    await open($)
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(0)
+    expect(w.asked.length).toBe(0)
+    expect(w.status.at(-1)).toBe('keepwarm paused: weekly usage 80%')
+    expect(w.logs.at(-1)).toBe('keepwarm paused: weekly usage 80%')
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/pauses at 75% weekly usage/)
+  })
+
+  for (const [name, pct] of [['50%', 50], ['an unavailable reading', null]] as const) {
+    test(`weekly usage: ${name} pings (fails open)`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [warm], { weekly: { pct } })
+      await open($)
+      await clock.advance(50 * MIN)
+      expect(w.forks.length).toBe(1)
+    })
+  }
+
+  test('usage dropping below 75% at a later check resumes the pings', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const weekly = { pct: 80 as number | null }
+    const w = world(on, [warm, warm], { weekly })
+    await open($)
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(0)
+    weekly.pct = 40
+    await clock.advance(10 * MIN)
+    expect(w.forks.length).toBe(0)
+    await clock.advance(40 * MIN)
+    expect(w.forks.length).toBe(0)
+    expect(w.status.at(-1)).toMatch(/cold now/)
   })
 })
