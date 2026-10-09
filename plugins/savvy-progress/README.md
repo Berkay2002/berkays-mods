@@ -3,6 +3,7 @@
 > **berkays-mods copy** of [johnnyvizz/claude-kit](https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress) 1.2.0 (MIT, johnnyvizz).
 > Added: the claude-config agents `scout` (Haiku), `builder` (Sonnet) and `reviewer` (Opus) are tiers of their own,
 > with their own crabs, and count for the bar and the panel's auto-open the way `savvy-*` workers do.
+> The progress bar's crab is the orchestrator (the main session): a conductor in a top hat whose baton keeps time.
 > Install with `claude plugin install savvy-progress@berkays-mods`.
 
 A Claude Code mod: a progress bar above the prompt and a live panel of subagents. Made for the [savvy-flow](../savvy-flow) skill, and useful with any subagents.

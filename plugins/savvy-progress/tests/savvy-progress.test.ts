@@ -14,8 +14,8 @@ describe('claude-config crew', () => {
   })
 
   test('each crew crab wears its own costume', async () => {
-    const drawn = ['scout', 'builder', 'reviewer', 'other'].map(c => crab(0, 0, c))
-    expect(new Set(drawn).size).toBe(4)
+    const drawn = ['scout', 'builder', 'reviewer', 'orchestrator', 'other'].map(c => crab(0, 0, c))
+    expect(new Set(drawn).size).toBe(5)
     expect(crab(0, 0, 'builder', false, true)).toContain('class="c-builder run"')
   })
 })

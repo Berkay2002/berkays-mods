@@ -262,7 +262,7 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
 <text x="${pillX + pillW / 2}" y="${BAR_H / 2 + 4}" text-anchor="middle" font-family="${FONT}" font-size="11" font-weight="600" fill="#ffffff">${xml(text)}</text>
 </g>
 <text class="m" x="${W - CRAB_W - 6}" y="${H / 2 + 4.5}" text-anchor="end" font-family="${FONT}" font-size="12.5" font-variant-numeric="tabular-nums">${percent}</text>
-${CRAB_CSS}${crab(W - CRAB_W + 1, 0, 'other', false, isWorking, 0.8)}
+${CRAB_CSS}${crab(W - CRAB_W + 1, 0, 'orchestrator', false, isWorking, 0.8)}
 </svg>`
 }
 
@@ -284,6 +284,8 @@ const TIER_COLOR: Record<string, string> = {
   scout: '#5E8C3A',
   builder: '#E07B39',
   reviewer: '#8F6BD8',
+  // The main session, drawn on the progress bar.
+  orchestrator: '#C8A13A',
   other: '#888780',
 }
 
@@ -454,6 +456,8 @@ const CRAB_CSS = `<style>
 .c-reviewer.run .ck{animation:blink 1s steps(1) infinite}
 .c-reviewer.run .tas{transform-origin:50% 0;animation:sway 1s ease-in-out infinite}
 @keyframes sway{50%{transform:rotate(20deg)}}
+.c-orchestrator.run .it{transform-origin:0 100%;animation:conduct 1s ease-in-out infinite}
+@keyframes conduct{25%{transform:rotate(-20deg)}75%{transform:rotate(15deg)}}
 @media (prefers-reduced-motion: reduce){.run,.run g{animation:none!important}}
 </style>`
 
@@ -524,6 +528,13 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
     f(18, 11, 4, 1, k); f(18, 14, 4, 1, k); f(18, 11, 1, 4, k); f(21, 11, 1, 4, k); f(12, 12, 6, 1, k)
     f(24, 3, 5, 8, '#A0703F'); f(25, 4, 3, 6, '#F8F6F1'); f(25, 2, 3, 2, '#8E929A')
     f(25, 6, 1, 1, t, 'ck'); f(26, 7, 1, 1, t, 'ck'); f(27, 5, 1, 2, t, 'ck')
+  },
+  // Orchestrator (the main session, on the progress bar): conductor in a top hat and bow tie; the baton keeps time.
+  orchestrator: (f, t) => {
+    crabBody(f, -4, 'it')
+    stamp(f, 8, 3, ['...hhhhhhhh...', '...hhhhhhhh...', '...hhhhhhhh...', '...hhhhhhhh...', '...bbbbbbbb...', '...hhhhhhhh...', 'hhhhhhhhhhhhhh'], { h: '#2C2C2E', b: t })
+    stamp(f, 12, 16, ['tt..tt', 'tttttt', 'tt..tt'], { t })
+    stamp(f, 25, 3, ['....w', '....k', '...k.', '...k.', '..k..', '..k..', '.k...'], { k: '#3A3A3C', w: t }, 'it')
   },
   other: f => crabBody(f),
 }
