@@ -107,6 +107,28 @@ async function sendFiles($: EngineInterface, s: Sender, paths: string[]): Promis
   }
 }
 
+/**
+ * A worker is a local session running in a linked git worktree (where /orchestrate puts them).
+ * Keeps an orchestrator's own messages to a worker from reading as "done" inside that worker.
+ */
+async function isWorker($: EngineInterface, name: string): Promise<boolean> {
+  try {
+    const r = await $.process.run(['claude', 'agents', '--json'], { timeoutMs: 10_000 })
+    if (r.exitCode !== 0) return false
+    const list: unknown = JSON.parse(r.stdout)
+    const cwd = Array.isArray(list) ? list.find(a => a?.name === name)?.cwd : undefined
+    if (typeof cwd !== 'string') return false
+    const g = await $.process.run(
+      ['git', '-C', cwd, 'rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'],
+      { timeoutMs: 5000 },
+    )
+    const [dir, common] = g.stdout.trim().split(/\r?\n/)
+    return g.exitCode === 0 && !!dir && !!common && dir !== common
+  } catch {
+    return false
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
@@ -120,8 +142,11 @@ export const register: Register = on => {
     if (!msg) return queued
     const { body } = msg
     const short = shortNames([msg.name])[0]
+    const isProof = hasProof(body)
+    if (!isProof && !readsDone(body)) return queued
+    if (!(await isWorker($, msg.name))) return queued
 
-    if (hasProof(body)) {
+    if (isProof) {
       const paths = proofPaths(body)
       const at = await $.clock.now()
       const entry: ProofGatePending = { name: msg.name, address: msg.address, files: paths.length, at }
@@ -132,8 +157,6 @@ export const register: Register = on => {
       $.ui.toast(`${short} sent proof · ${what}`)
       return queued
     }
-
-    if (!readsDone(body)) return queued
 
     const key = messageKey(msg, body)
     if ((await read($, asked)).includes(key)) return queued

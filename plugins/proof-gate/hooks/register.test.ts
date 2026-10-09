@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import { sessions } from './sessions.mock'
 
 const env = (name: string, body: string) =>
   `Another Claude session sent a message:\n<cross-session-message from="uds:/tmp/cc-socks/1.sock" from-name="${name}" from-mode="bypass">\n${body}\n</cross-session-message>`
@@ -35,8 +36,18 @@ function world(on: On, opts: { hasSendUserFile?: boolean } = {}) {
     files.push([...e.files])
     return { result: null, text: 'ok' }
   })
+  sessions(on)
   return { sends, toasts, statuses, files }
 }
+
+test("an orchestrator's message is never read as a worker's report", async ($, on) => {
+  const w = world(on)
+  await receive($, env('orchestrator', "If the drafts aren't finished yet, use the logo; commit when done. Shots: /tmp/a.png"))
+  await receive($, env('unknown-session', 'All done, committed at abc1234.'))
+  expect(w.sends).toHaveLength(0)
+  expect(w.files).toHaveLength(0)
+  expect(w.statuses).toHaveLength(0)
+})
 
 const receive = ($: Engine, text: string) =>
   $.session.receive({ origin: { kind: 'peer' }, text })

@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import { sessions } from './sessions.mock'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -33,6 +34,7 @@ function world(on: On) {
     fills.push(e.text)
     return { isFilled: true }
   })
+  sessions(on)
   return { fills }
 }
 
