@@ -15,7 +15,7 @@ const AGENTS = [
 function world(on: On, limits: SessionRateLimit[], stored?: Record<string, unknown>) {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on, stored)
-  const seen = { status: [] as (string | undefined)[], toasts: [] as string[], prompts: [] as string[], sends: [] as unknown[] }
+  const seen = { status: [] as (string | undefined)[], tail: undefined as string | undefined, toasts: [] as string[], prompts: [] as string[], sends: [] as unknown[] }
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'me' }))
   on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 200000 }, rateLimits: limits } }))
@@ -27,6 +27,11 @@ function world(on: On, limits: SessionRateLimit[], stored?: Record<string, unkno
   on('ui.status', ($, e) => {
     seen.status.push(e.text)
     return { value: undefined }
+  })
+  // The engine's own hint line: records the tail it is handed.
+  on('ui.render', { component: 'PromptHint' }, ($, e) => {
+    seen.tail = e.props.tail
+    return $.ui.resolve(e).Text({ children: [e.props.hint] })
   })
   on('ui.toast', ($, e) => {
     seen.toasts.push(e.text)
@@ -46,6 +51,19 @@ function world(on: On, limits: SessionRateLimit[], stored?: Record<string, unkno
   return { clock, seen }
 }
 
+// The tail the engine's hint line would draw, given one a hook above already set.
+async function tailOf($: Engine, seen: { tail?: string }, existing?: string) {
+  seen.tail = undefined
+  const ui = await $.ui.mount({
+    plugin: 'limit-resume',
+    surface: 'terminal',
+    component: 'PromptHint',
+    props: { isDraft: false, isWorking: false, hint: '? for shortcuts', ...(existing ? { tail: existing } : {}) },
+  })
+  await ui.unmount()
+  return seen.tail
+}
+
 const start = ($: Engine) => $.session.start({ cwd: '/x', surface: 'terminal', isInteractive: true })
 const measure = ($: Engine, rateLimits: SessionRateLimit[]) =>
   $.session.measure({ context: { window: 200000 }, rateLimits, changed: ['rateLimits'] })
@@ -63,6 +81,8 @@ test('resumes itself and nudges idle workers once after the reset', async ($, on
   }
   await measure($, cut)
   expect(seen.status.at(-1)).toMatch(/^⏸ limit · resumes \d\d:\d\d · 2 workers$/)
+  // While paused the hint line carries nothing.
+  expect(await tailOf($, seen)).toBeUndefined()
   expect(seen.toasts.at(-1)).toMatch(/^Usage limit reached · resuming at \d\d:\d\d$/)
 
   // Within the last hour the status counts down.
@@ -112,15 +132,18 @@ test('a pending reset survives a reload through the store', async ($, on) => {
   expect(seen.prompts).toEqual(['Continue. The usage limit has reset.'])
 })
 
-test('the status line shows only near the limit', async ($, on) => {
+test('the hint tail shows only near the limit, and never as a notice', async ($, on) => {
   const { seen } = world(on, [])
   await start($)
   await measure($, [{ kind: 'five_hour', percentUsed: 50, resetsAt: iso(RESET) }])
-  expect(seen.status.at(-1)).toBeUndefined()
+  expect(await tailOf($, seen)).toBeUndefined()
   await measure($, [{ kind: 'five_hour', percentUsed: 86, resetsAt: iso(RESET) }])
-  expect(seen.status.at(-1)).toMatch(/^5h 86% · resets \d\d:\d\d$/)
-  await measure($, [{ kind: 'five_hour', percentUsed: 12, resetsAt: iso(RESET) }])
+  expect(await tailOf($, seen)).toMatch(/^5h 86% · resets \d\d:\d\d$/)
   expect(seen.status.at(-1)).toBeUndefined()
+  // A tail another hook already set is kept and appended to.
+  expect(await tailOf($, seen, '1 agent')).toMatch(/^1 agent · 5h 86% · resets \d\d:\d\d$/)
+  await measure($, [{ kind: 'five_hour', percentUsed: 12, resetsAt: iso(RESET) }])
+  expect(await tailOf($, seen)).toBeUndefined()
 })
 
 test('each prompt carries a one-line usage note', async ($, on) => {

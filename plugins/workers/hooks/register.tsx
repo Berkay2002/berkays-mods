@@ -33,6 +33,7 @@ const updatedAt = atom({ plugin: 'workers', key: 'updatedAt' } as const, 0)
 const showAll = atom({ plugin: 'workers', key: 'showAll' } as const, false)
 const error = atom({ plugin: 'workers', key: 'error' } as const, null)
 const isOpen = atom({ plugin: 'workers', key: 'isOpen' } as const, false)
+const needs = atom({ plugin: 'workers', key: 'needs' } as const, 0)
 
 async function git($: EngineInterface, cwd: string, args: string[]): Promise<string | null> {
   try {
@@ -112,11 +113,11 @@ async function refresh($: EngineInterface): Promise<number> {
     await update($, others, () => agents.length - live.length)
     await update($, error, () => null)
     await update($, updatedAt, () => now)
-    // Only real workers count toward the status line, also while the pane shows every session.
+    // Only real workers count toward the hint tail, also while the pane shows every session.
     const workerIds = new Set(agents.filter(a => isWorker(a, known, repo?.root ?? null)).map(a => a.sessionId))
     const isReal = (w: Worker) => w.state === 'gone' || workerIds.has(w.sessionId)
-    const needs = list.filter(w => isReal(w) && lookOf(w, contactFor(known, w)).rank === 0).length
-    $.ui.status(needs > 0 ? `${needs} worker${needs === 1 ? ' needs' : 's need'} you` : undefined)
+    const waiting = list.filter(w => isReal(w) && lookOf(w, contactFor(known, w)).rank === 0).length
+    await update($, needs, () => waiting)
     return list.length
   } finally {
     isRefreshing = false
@@ -204,6 +205,15 @@ export const register: Register = on => {
       await touch($, from, { text: body.slice(0, 200), at: Date.now(), dir: 'in', needsYou: asksForYou(body) })
     }
     return received
+  })
+
+  // Workers waiting on the person ride the hint line as a dim tail, after any tail another hook already set.
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const n = await read($, needs)
+    if (n <= 0) return next(e)
+    const line = `${n} worker${n === 1 ? '' : 's'} waiting`
+    const tail = e.props.tail ? `${e.props.tail} · ${line}` : line
+    return next({ ...e, props: { ...e.props, tail } })
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

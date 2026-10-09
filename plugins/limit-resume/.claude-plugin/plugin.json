@@ -4,5 +4,6 @@
   "author": {
     "name": "Berkay Orhan"
   },
-  "repository": "https://github.com/Berkay2002/berkays-mods"
+  "repository": "https://github.com/Berkay2002/berkays-mods",
+  "types": "./types/index.d.ts"
 }

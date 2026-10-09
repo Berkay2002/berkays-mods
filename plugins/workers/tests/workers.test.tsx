@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { asksForYou, bodyOf, contactKey, cut, isWorker, senderOf } from '../hooks/lib'
@@ -9,6 +10,9 @@ const AGENTS = JSON.stringify([
   { pid: 2, cwd: '/repo/.claude/worktrees/ui', sessionId: 'u', name: 'brf-app-ui', status: 'idle' },
   { pid: 3, cwd: '/elsewhere', sessionId: 'x', name: 'unrelated', status: 'busy' },
 ])
+
+// The tail the engine's own hint line was last handed.
+const hint: { tail?: string } = {}
 
 const engine = (on: On, opened: string[], filled: string[] = [], agents = AGENTS) => {
   mock.clock(on, { now: 1_000 })
@@ -25,6 +29,10 @@ const engine = (on: On, opened: string[], filled: string[] = [], agents = AGENTS
   })
   on('ui.close', () => ({ value: undefined }) as never)
   on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.render', { component: 'PromptHint' }, ($, e) => {
+    hint.tail = e.props.tail
+    return $.ui.resolve(e).Text({ children: [e.props.hint] })
+  })
   on('prompt.fill', (_$, e) => {
     filled.push(e.text)
     return { isFilled: true, box: { text: e.text, cursor: e.text.length } } as never
@@ -40,6 +48,18 @@ const engine = (on: On, opened: string[], filled: string[] = [], agents = AGENTS
     if (rest[0] === 'status') return out(' M a.ts\n?? b.ts\n') as never
     return out('', 1) as never
   })
+}
+
+const tailOf = async ($: Engine, tail?: string) => {
+  hint.tail = undefined
+  const ui = await $.ui.mount({
+    plugin: 'workers',
+    surface: 'terminal',
+    component: 'PromptHint',
+    props: { isDraft: false, isWorking: false, hint: '? for shortcuts', ...(tail ? { tail } : {}) },
+  })
+  await ui.unmount()
+  return hint.tail
 }
 
 describe('lib', () => {
@@ -103,6 +123,9 @@ describe('pane', () => {
     await $.session.receive({ origin: { kind: 'peer' }, text: ASK })
     await $.session.start(START)
     expect(opened).toEqual(['workers'])
+    expect(await tailOf($)).toBe('1 worker waiting')
+    // A tail another hook already set is kept and appended to.
+    expect(await tailOf($, '1 agent')).toBe('1 agent · 1 worker waiting')
 
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ ...pane(80), surface })
@@ -147,6 +170,7 @@ describe('pane', () => {
     engine(on, opened, [], JSON.stringify([{ pid: 1, cwd: '/repo', sessionId: 'self', name: 'me', status: 'busy' }]))
     await $.session.start(START)
     expect(opened).toEqual([])
+    expect(await tailOf($)).toBeUndefined()
     await $.command.run({ command: 'workers', args: '', origin: { kind: 'composer' } as never, presentation: undefined as never })
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ ...pane(80), surface })

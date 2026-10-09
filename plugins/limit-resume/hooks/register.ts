@@ -1,4 +1,7 @@
+import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionRateLimit, Timer } from 'claude-code'
+
+const tail = atom({ plugin: 'limit-resume', key: 'tail' } as const, '')
 
 const RESUME_TEXT = 'Continue. The usage limit has reset.'
 const NUDGE_TEXT = 'Usage limit has reset. Continue your task.'
@@ -6,7 +9,7 @@ const NUDGE_TEXT = 'Usage limit has reset. Continue your task.'
 const GRACE_MS = 60_000
 // When a turn dies on a rate limit but no window reports a reset time, try again this much later.
 const UNKNOWN_RESET_MS = 30 * 60_000
-// The status line stays empty below this 5h percentage.
+// The hint tail stays empty below this 5h percentage.
 const WARN_PERCENT = 80
 const MINUTE = 60_000
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -73,16 +76,20 @@ async function refreshStatus($: EngineInterface) {
   const p = saved.pending
   if (p) {
     const n = saved.workers.length
+    // A pause is a real alert: it keeps the pinned notice, and the hint tail stays empty.
     $.ui.status(`⏸ limit · ${resumeLabel(p, now)}${n ? ` · ${plural(n, 'worker')}` : ''}`)
+    await update($, tail, () => '')
     return
   }
+  // Clears a pause notice left from before the resume.
+  $.ui.status(undefined)
   const five = limits.find(r => r.kind === 'five_hour')
   if (!five || five.percentUsed < WARN_PERCENT) {
-    $.ui.status(undefined)
+    await update($, tail, () => '')
     return
   }
   const reset = resetOf(five)
-  $.ui.status(`5h ${five.percentUsed}%${reset === null ? '' : ` · resets ${when(reset, now)}`}`)
+  await update($, tail, () => `5h ${five.percentUsed}%${reset === null ? '' : ` · resets ${when(reset, now)}`}`)
 }
 
 async function schedule($: EngineInterface) {
@@ -232,6 +239,13 @@ export const register: Register = on => {
     if (saved.pending && !saved.handled.includes(saved.pending.resetsAt)) await schedule($)
     else await refreshStatus($)
     return next(e)
+  })
+
+  // The 5h reading rides the hint line as a dim tail, after any tail another hook already set.
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const line = await read($, tail)
+    if (!line) return next(e)
+    return next({ ...e, props: { ...e.props, tail: e.props.tail ? `${e.props.tail} · ${line}` : line } })
   })
 
   on('command.run', { command: 'limits' }, async $ => {

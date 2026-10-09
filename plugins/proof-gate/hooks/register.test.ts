@@ -9,8 +9,9 @@ const env = (name: string, body: string) =>
 function world(on: On, opts: { hasSendUserFile?: boolean } = {}) {
   const sends: { to: string; text: string }[] = []
   const toasts: string[] = []
-  const statuses: (string | undefined)[] = []
+  let engineTail: string | undefined
   const files: string[][] = []
+  const seen: { tail?: string } = {}
   on('session.send', (_$, e) => {
     sends.push({ to: e.to, text: e.text })
     return { isDelivered: true }
@@ -20,9 +21,11 @@ function world(on: On, opts: { hasSendUserFile?: boolean } = {}) {
     toasts.push(e.text)
     return { value: undefined }
   })
-  on('ui.status', (_$, e) => {
-    statuses.push(e.text)
-    return { value: undefined }
+  on('ui.status', () => ({ value: undefined }))
+  // The engine's own hint line: records the tail it is handed.
+  on('ui.render', { component: 'PromptHint' }, ($, e) => {
+    seen.tail = e.props.tail
+    return $.ui.resolve(e).Text({ children: [e.props.hint] })
   })
   mock.env(on, { HOME: '/Users/me' })
   mock.clock(on, { now: 1_000_000 })
@@ -37,7 +40,18 @@ function world(on: On, opts: { hasSendUserFile?: boolean } = {}) {
     return { result: null, text: 'ok' }
   })
   sessions(on)
-  return { sends, toasts, statuses, files }
+  /** The tail the engine would draw on the hint line, given one a hook above already set. */
+  const tail = async ($: Engine, existing?: string) => {
+    seen.tail = undefined
+    await $.ui.mount({
+      plugin: 'proof-gate',
+      surface: 'terminal',
+      component: 'PromptHint',
+      props: { isDraft: false, isWorking: false, hint: '? for shortcuts', ...(existing ? { tail: existing } : {}) },
+    })
+    return seen.tail
+  }
+  return { sends, toasts, tail, files }
 }
 
 test("an orchestrator's message is never read as a worker's report", async ($, on) => {
@@ -46,7 +60,7 @@ test("an orchestrator's message is never read as a worker's report", async ($, o
   await receive($, env('unknown-session', 'All done, committed at abc1234.'))
   expect(w.sends).toHaveLength(0)
   expect(w.files).toHaveLength(0)
-  expect(w.statuses).toHaveLength(0)
+  expect(await w.tail($)).toBeUndefined()
 })
 
 const receive = ($: Engine, text: string) =>
@@ -82,23 +96,30 @@ test('proof paths are sent to the person and the sender waits for approval', asy
   expect(w.sends).toHaveLength(0)
   expect(w.files).toEqual([['/tmp/shots/desk.png', '/Users/me/shots/mobile.mp4']])
   expect(w.toasts[0]).toBe('charts sent proof · 3 files')
-  expect(w.statuses.at(-1)).toBe('1 to approve · charts')
+  expect(await w.tail($)).toBe('charts to approve')
 
   await $.session.send({ to: 'brf-app-charts', text: 'note', origin: { kind: 'plugin', name: 'other' } } as never)
-  expect(w.statuses.at(-1)).toBe('1 to approve · charts')
+  expect(await w.tail($)).toBe('charts to approve')
 })
 
-test('a model send to the worker clears it from the status line', async ($, on) => {
+test('a model send to the worker clears it from the hint tail', async ($, on) => {
   const w = world(on, { hasSendUserFile: false })
   await receive($, env('brf-app-pdf', 'Screenshots are in .claude/briefs/east/shots/ now.'))
   expect(w.files).toHaveLength(0)
-  expect(w.statuses.at(-1)).toBe('1 to approve · pdf')
+  expect(await w.tail($)).toBe('pdf to approve')
 
   await $.session.send({ to: 'brf-app-pdf', text: 'Looks good, merging.', origin: { kind: 'model' } })
-  expect(w.statuses.at(-1)).toBeUndefined()
+  expect(await w.tail($)).toBeUndefined()
 })
 
-test('the status line strips the shared prefix and caps at three names', async ($, on) => {
+test('a pre-existing tail is kept and appended to', async ($, on) => {
+  const w = world(on, { hasSendUserFile: false })
+  expect(await w.tail($, '1 agent')).toBe('1 agent')
+  await receive($, env('brf-app-pdf', 'Screenshots are in .claude/briefs/east/shots/ now.'))
+  expect(await w.tail($, '1 agent')).toBe('1 agent · pdf to approve')
+})
+
+test('the hint tail strips the shared prefix and caps at three names', async ($, on) => {
   const w = world(on, { hasSendUserFile: false })
   for (const n of ['compare', 'charts', 'reading', 'monthly', 'areas']) {
     await $.session.receive({
@@ -106,5 +127,6 @@ test('the status line strips the shared prefix and caps at three names', async (
       text: env(`brf-app-${n}`, `Shots: shots/${n}.png`).replace('1.sock', `${n}.sock`),
     })
   }
-  expect(w.statuses.at(-1)).toBe('5 to approve · compare, charts, reading +2')
+  expect(await w.tail($)).toBe('5 to approve · compare, charts, reading +2')
+  expect(await w.tail($, 'other')).toBe('other · 5 to approve · compare, charts, reading +2')
 })

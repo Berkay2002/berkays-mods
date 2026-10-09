@@ -67,7 +67,7 @@ export function statusLine(list: readonly ProofGatePending[]): string | undefine
   const short = shortNames(list.map(p => p.name))
   const shown = short.slice(0, STATUS_NAMES).join(', ')
   const more = short.length > STATUS_NAMES ? ` +${short.length - STATUS_NAMES}` : ''
-  return `${list.length} to approve · ${shown}${more}`
+  return list.length === 1 ? `${shown} to approve` : `${list.length} to approve · ${shown}${more}`
 }
 
 export function ago(ms: number): string {
@@ -130,12 +130,6 @@ async function isWorker($: EngineInterface, name: string): Promise<boolean> {
 }
 
 export const register: Register = on => {
-  on('session.start', async ($, e, next) => {
-    const r = await next(e)
-    $.ui.status(statusLine(await read($, pending)))
-    return r
-  })
-
   on('session.receive', async ($, e, next) => {
     const queued = await next(e)
     const msg = parse(e.text)
@@ -150,8 +144,7 @@ export const register: Register = on => {
       const paths = proofPaths(body)
       const at = await $.clock.now()
       const entry: ProofGatePending = { name: msg.name, address: msg.address, files: paths.length, at }
-      const list = await update($, pending, l => [...l.filter(p => p.address !== msg.address), entry])
-      $.ui.status(statusLine(list))
+      await update($, pending, l => [...l.filter(p => p.address !== msg.address), entry])
       await sendFiles($, msg, paths)
       const what = paths.length === 1 ? '1 file' : paths.length ? `${paths.length} files` : 'a folder'
       $.ui.toast(`${short} sent proof · ${what}`)
@@ -174,9 +167,16 @@ export const register: Register = on => {
     const left = before.filter(p => p.address !== e.to && p.name !== e.to)
     if (left.length !== before.length) {
       await update($, pending, () => left)
-      $.ui.status(statusLine(left))
     }
     return r
+  })
+
+  // The pending count rides the hint line as a dim tail, after any tail another hook already set.
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const line = statusLine(await read($, pending))
+    if (!line) return next(e)
+    const tail = e.props.tail ? `${e.props.tail} · ${line}` : line
+    return next({ ...e, props: { ...e.props, tail } })
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -220,10 +220,7 @@ export const register: Register = on => {
                 key={`dismiss-${p.address}`}
                 label="Dismiss"
                 dimColor
-                onPress={async () => {
-                  const left = await update($, pending, l => l.filter(q => q.address !== p.address))
-                  $.ui.status(statusLine(left))
-                }}
+                onPress={() => void update($, pending, l => l.filter(q => q.address !== p.address))}
               />
             </Box>
           )

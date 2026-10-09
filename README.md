@@ -4,7 +4,7 @@ Claude Code mods for running orchestrator and worker sessions. Built and tested 
 
 | Mod | What it does |
 | --- | --- |
-| `limit-resume` | When the 5-hour limit resets, sends "Continue" to the session and nudges idle workers. Status line from 80%, `/limits`, and a one-line usage note for Claude each turn. |
+| `limit-resume` | When the 5-hour limit resets, sends "Continue" to the session and nudges idle workers. A dim usage tail on the prompt hint line from 80%, `/limits`, and a one-line usage note for Claude each turn. |
 | `workers` | `/workers` opens a pane with every worker: state, branch, commits ahead of main, changed files, last message, and who needs you. `/workers all` shows every session. |
 | `identity-keeper` | Remembers the session name (from `/rename` or "You are <name>" in the first prompt), restores it after a restart, and gives Claude a short role card after each compaction. `/identity`, `/identity forget`. |
 | `proof-gate` | When a worker reports done without screenshots, asks it for them. When proof arrives, sends the files to you and shows a band above the prompt with Approve and Ask changes. |

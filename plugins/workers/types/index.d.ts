@@ -36,6 +36,8 @@ declare module 'claude-code' {
       error: string | null
       /** Whether this plugin's pane is open, kept across reloads. */
       isOpen: boolean
+      /** Workers waiting on the person; the hint line's tail. */
+      needs: number
     }
   }
 }
