@@ -1,0 +1,9 @@
+{
+  "name": "route-ledger",
+  "description": "Records which model and effort each subagent or background session ran at and how it went, with /routing-review to tune routing rules",
+  "author": {
+    "name": "Berkay Orhan"
+  },
+  "repository": "https://github.com/Berkay2002/berkays-mods",
+  "types": "./types/index.d.ts"
+}
