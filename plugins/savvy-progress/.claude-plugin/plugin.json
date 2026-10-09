@@ -1,0 +1,25 @@
+{
+  "name": "savvy-progress",
+  "description": "Progress bar above the prompt and an agents panel (/agents-info): running, finished and planned subagents with model, progress, context, cost and time. Crabs for the claude-config scout, builder and reviewer. Copy of johnnyvizz/claude-kit savvy-progress 1.2.0.",
+  "author": {
+    "name": "johnnyvizz",
+    "url": "https://github.com/johnnyvizz"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Panel language",
+      "description": "auto follows Claude Code's language setting, then the system locale",
+      "default": "auto",
+      "options": [
+        "auto",
+        "en",
+        "ru"
+      ]
+    }
+  },
+  "homepage": "https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress",
+  "repository": "https://github.com/Berkay2002/berkays-mods",
+  "license": "MIT"
+}

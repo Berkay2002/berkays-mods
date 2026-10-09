@@ -1,0 +1,10 @@
+{
+  "name": "cache-tax",
+  "description": "Keeps the one-hour prompt cache warm during breaks (/keepwarm) and shows a cold send's estimated rewrite cost; this copy warns by default instead of refusing. Warming costs tokens. Copy of karanb192/cache-tax 2.2.1.",
+  "author": {
+    "name": "Karan Bansal"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/karanb192/cache-tax",
+  "repository": "https://github.com/Berkay2002/berkays-mods"
+}

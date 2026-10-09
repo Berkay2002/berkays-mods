@@ -38,6 +38,16 @@
       "name": "config-sync",
       "source": "./plugins/config-sync",
       "description": "Pulls the shared claude-config repo at session start, tells you when settings.shared.json changed, and applies it with /config-sync apply"
+    },
+    {
+      "name": "savvy-progress",
+      "source": "./plugins/savvy-progress",
+      "description": "Progress bar above the prompt and a live agents panel (/agents-info), with crabs for scout, builder and reviewer. Copy of johnnyvizz/claude-kit savvy-progress"
+    },
+    {
+      "name": "cache-tax",
+      "source": "./plugins/cache-tax",
+      "description": "Keeps the one-hour prompt cache warm for 8h every session and shows a cold send's rewrite cost; warns, never drops. Copy of karanb192/cache-tax"
     }
   ]
 }
