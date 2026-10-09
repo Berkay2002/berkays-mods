@@ -68,6 +68,8 @@ declare module 'claude-code' {
       agents: AgentRun[]
       panel: Panel
       now: number
+      /** Which of the two crab frames the running rows show; flips while something runs. */
+      frame: number
       bg: BgSession[]
       /** What this session's own background launches asked for, by lowercase `--name`. */
       launches: Record<string, { model?: string; effort?: string; agent?: string }>

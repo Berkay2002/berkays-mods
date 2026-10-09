@@ -12,9 +12,9 @@ export type Run = { text: string; fg?: string; bg?: string }
 
 export const GRID_W = 30
 export const GRID_H = 28
-/** The terminal sprite: 12 columns by 5 lines of two pixels each. */
-export const SPRITE_W = 12
-export const SPRITE_H = 10
+/** The terminal sprite: 10 columns by 3 lines of two pixels each, as tall as a row's three lines of text. */
+export const SPRITE_W = 10
+export const SPRITE_H = 6
 
 // '#rgb', '#rrggbb' or 'rgba(r,g,b,a)'. A mostly see-through color (the astronaut's glass) is transparent.
 const solid = (c: string): Px => {

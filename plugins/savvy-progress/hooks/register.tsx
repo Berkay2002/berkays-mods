@@ -14,6 +14,7 @@ const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   autoOpenedFor: '',
 })
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
+const frame = atom({ plugin: 'savvy-progress', key: 'frame' } as const, 0)
 const bg = atom({ plugin: 'savvy-progress', key: 'bg' } as const, [])
 const launches = atom({ plugin: 'savvy-progress', key: 'launches' } as const, {})
 
@@ -21,6 +22,7 @@ const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const PANE = 'savvy-agents'
 const BG_EVERY_MS = 5000
+const CRAB_EVERY_MS = 500
 const PHASES: readonly Phase[] = ['plan', 'design', 'delegate', 'review', 'close']
 const ACCENT = '#8f8cf4'
 const DONE = '#5fbf8f'
@@ -558,15 +560,43 @@ const costumeOf = (type: string): string => (type === 'Explore' ? 'explore' : ti
 
 // --- terminal crabs: the same costumes, rasterized and shrunk (sprite.ts).
 
-// Crop to the union of all costumes, so every tier's crab is drawn at one scale.
+// Frame 1 of a running crab: where each animated part (its `cls`) moves, in grid pixels; null hides it.
+// Parts not listed stay. The SVG's own motion (CRAB_CSS) needs a compositor; here it is two poses.
+type Move = [dx: number, dy: number] | null
+const POSE: Record<string, Record<string, Move>> = {
+  fable: { bd: [0, 3], ant: [0, 3], star: [0, 3] },
+  heavy: { it: [-3, 3], gl: null },
+  careful: { it: [2, 3] },
+  medium: { pan: [0, 2], egg: [0, -5] },
+  light: { flag: [0, 2], la: [0, -2], lb: [0, 2] },
+  explore: { it: [-3, 2] },
+  scout: { it: [-3, 0] },
+  builder: { it: [-2, 5] },
+  reviewer: { ck: null, tas: [3, 0] },
+  orchestrator: { it: [-3, 3] },
+  other: { bd: [0, 3], la: [0, -2], lb: [0, 2] },
+}
+
+// Crop to the union of all costumes, so every tier's crab is drawn at one scale; cached per costume and frame.
 const sprites = new Map<string, Grid>()
-export const spriteOf = (costume: string): Grid => {
+export const spriteOf = (costume: string, frame = 0): Grid => {
   if (sprites.size === 0) {
-    const raw = Object.entries(COSTUMES).map(([k, draw]) => [k, rasterize(f => draw(f, colorOf(k)))] as const)
+    const draw = (k: string, f: number) =>
+      rasterize(put =>
+        COSTUMES[k]?.((x, y, w, h, c, cls = 'bd') => {
+          const m = f ? POSE[k]?.[cls] : [0, 0]
+          if (m !== null) put(x + (m?.[0] ?? 0), y + (m?.[1] ?? 0), w, h, c, cls)
+        }, colorOf(k)),
+      )
+    const raw = Object.keys(COSTUMES).map(k => [k, draw(k, 0), draw(k, 1)] as const)
     const box = boundsOf(raw.map(([, g]) => g))
-    for (const [k, g] of raw) sprites.set(k, downsample(g, box))
+    for (const [k, a, b] of raw) {
+      sprites.set(`${k}:0`, downsample(a, box))
+      sprites.set(`${k}:1`, downsample(b, box))
+    }
   }
-  return sprites.get(costume) ?? sprites.get('other') ?? []
+  const k = costume in COSTUMES ? costume : 'other'
+  return sprites.get(`${k}:${frame}`) ?? []
 }
 
 // The band is one line of text and short on room: the orchestrator alone, cropped to itself, 10 by 6 pixels.
@@ -888,6 +918,13 @@ export const register: Register = (on, options) => {
         await update($, now, () => at)
       })()
     })
+    // Flips the running crabs' pose; quiet unless the pane is open and something runs.
+    $.clock.every(CRAB_EVERY_MS, () => {
+      void (async () => {
+        const isBusy = (await read($, agents)).some(a => a.status === 'running') || (await read($, bg)).some(b => b.state === 'busy')
+        if (isBusy && (await $.ui.panes()).some(p => p.id === PANE)) await update($, frame, n => 1 - n)
+      })()
+    })
     return started
   })
 
@@ -1137,18 +1174,19 @@ export const register: Register = (on, options) => {
       )
     }
 
-    // Terminal: the same content in text rows.
+    // Terminal: the same content in text rows. Read here, not above, so only this surface redraws on a frame tick.
+    const tick = await read($, frame)
     const cols = Math.max(24, e.props.bodyColumns || 40)
     // The crab takes SPRITE_W columns and a gap; on a narrow pane the old glyph stays.
     const hasCrab = cols >= 40
     const room = cols - (hasCrab ? SPRITE_W + 1 : 0)
     const barW = Math.max(6, Math.min(20, room - 34))
     const indent = hasCrab ? '' : '  '
-    const withCrab = (key: string, costume: string, body: JSX.Element) =>
+    const withCrab = (key: string, costume: string, body: JSX.Element, isAnimated: boolean) =>
       hasCrab ? (
         <Box key={key} flexDirection="row" gap={1} marginBottom={1}>
           <Box flexDirection="column" flexShrink={0} width={SPRITE_W}>
-            {crabLines(Text, spriteOf(costume), key)}
+            {crabLines(Text, spriteOf(costume, isAnimated ? tick : 0), key)}
           </Box>
           <Box flexDirection="column" justifyContent="center" width={room}>
             {body}
@@ -1184,6 +1222,7 @@ export const register: Register = (on, options) => {
             {b.branch ? ` · ${b.branch}` : ''}
           </Text>
         </>,
+        b.state === 'busy',
       )
     }
     const row = (a: AgentRun) => {
@@ -1218,6 +1257,7 @@ export const register: Register = (on, options) => {
             </Text>
           </Text>
         </>,
+        a.status === 'running',
       )
     }
 

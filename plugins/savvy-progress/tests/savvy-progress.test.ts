@@ -27,16 +27,28 @@ describe('terminal crabs', () => {
   const TIERS = ['scout', 'builder', 'reviewer', 'orchestrator', 'other', 'fable', 'heavy', 'careful', 'medium', 'light', 'explore']
 
   test('every costume downsamples to the same fixed grid, and the grids differ', async () => {
-    const grids = TIERS.map(spriteOf)
+    const grids = TIERS.map(t => spriteOf(t))
     for (const g of grids) {
       expect(g.length).toBe(SPRITE_H)
       for (const row of g) expect(row.length).toBe(SPRITE_W)
     }
     expect(new Set(grids.map(g => JSON.stringify(g))).size).toBe(TIERS.length)
     // The crab is drawn, not blank; a builder's hat reaches above the body of a plain crab.
-    expect(toText(spriteOf('other')).trim().length).toBeGreaterThan(20)
-    expect(toText(spriteOf('builder')).split('\n')[1]!.trim()).not.toBe('')
-    expect(toText(spriteOf('other')).split('\n')[1]!.trim()).toBe('')
+    expect(toText(spriteOf('other')).trim().length).toBeGreaterThan(12)
+    expect(toText(spriteOf('builder')).split('\n')[0]!.trim()).not.toBe('')
+    expect(toText(spriteOf('other')).split('\n')[0]!.trim()).toBe('')
+  })
+
+  test('the sprite is 6 pixel rows, three lines like the text beside it', async () => {
+    expect(SPRITE_H).toBe(6)
+    expect(toText(spriteOf('builder')).split('\n')).toHaveLength(3)
+  })
+
+  test('every tier has a second frame that differs from the first', async () => {
+    for (const t of TIERS) {
+      expect(spriteOf(t, 1).length).toBe(SPRITE_H)
+      expect(JSON.stringify(spriteOf(t, 1))).not.toBe(JSON.stringify(spriteOf(t, 0)))
+    }
   })
 })
 
@@ -62,8 +74,8 @@ const AGENTS = JSON.stringify([
 ])
 const WORKTREES = 'worktree /repo\nHEAD a\nbranch refs/heads/main\n\nworktree E:/Dev/repo-wt/x\nHEAD b\nbranch refs/heads/feat-x\n'
 
-const world = (on: On, calls: string[][] = []) => {
-  mock.clock(on, { now: 1_000 })
+const world = (on: On, calls: string[][] = [], agents = AGENTS) => {
+  const clock = mock.clock(on, { now: 1_000 })
   const out = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never
   const panes: string[] = []
   on('session.id', () => ({ value: 'self' }))
@@ -76,12 +88,17 @@ const world = (on: On, calls: string[][] = []) => {
     panes.push(e.id)
     return { value: { isPlaced: true } } as never
   })
+  on('ui.close', (_$, e) => {
+    panes.splice(panes.indexOf(e.id), 1)
+    return { value: undefined } as never
+  })
   on('ui.panes', () => ({ value: panes.map(id => ({ id })) }) as never)
   on('tool.call', () => ({ result: {}, text: '' }) as never)
   on('process.run', (_$, e) => {
     calls.push([...e.argv])
-    return out(e.argv[0] === 'claude' ? AGENTS : WORKTREES)
+    return out(e.argv[0] === 'claude' ? agents : WORKTREES)
   })
+  return clock
 }
 
 const pane = (bodyColumns: number) =>
@@ -118,6 +135,50 @@ describe('agents panel', () => {
     expect(all).toMatch(/[▀▄█]/)
     expect(nodes.some(t => (t.props as { color?: string }).color === '#e07b39')).toBe(true)
     expect(nodes.some(t => (t.props as { backgroundColor?: string }).backgroundColor !== undefined)).toBe(true)
+    await ui.unmount()
+  })
+
+  // The pane's glyphs and colors, as drawn now: the crab is half-block Text runs.
+  const crabs = async (ui: { findAll: (q: { type: string }) => Promise<{ text: string; props: unknown }[]> }) =>
+    JSON.stringify((await ui.findAll({ type: 'Text' })).map(t => [t.text, (t.props as { color?: string }).color, (t.props as { backgroundColor?: string }).backgroundColor]))
+
+  test('a busy session animates while the pane is open', async ($, on) => {
+    const clock = world(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: 'Bash', command: 'claude --bg --model sonnet --name x "build it"' } as never)
+    await $.command.run(OPEN)
+    const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+    const first = await crabs(ui)
+    await clock.advance(500)
+    const second = await crabs(ui)
+    expect(second).not.toBe(first)
+    await clock.advance(500)
+    expect(await crabs(ui)).toBe(first)
+    await ui.unmount()
+  })
+
+  test('a finished session does not animate, and nothing ticks with the pane closed', async ($, on) => {
+    const done = JSON.stringify([{ pid: 2, cwd: 'E:\\Dev\\repo-wt\\x', kind: 'background', sessionId: 'w', name: 'x', status: 'idle', state: 'done' }])
+    const quiet = world(on, [], done)
+    await $.session.start(START)
+    await $.command.run(OPEN)
+    const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+    const first = await crabs(ui)
+    await quiet.advance(1500)
+    expect(await crabs(ui)).toBe(first)
+    await ui.unmount()
+  })
+
+  test('a busy session with the pane closed does not tick', async ($, on) => {
+    const clock = world(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: 'Bash', command: 'claude --bg --model sonnet --name x "build it"' } as never)
+    await $.command.run(OPEN)
+    const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+    const first = await crabs(ui)
+    await $.command.run(OPEN) // closes the pane
+    await clock.advance(500)
+    expect(await crabs(ui)).toBe(first)
     await ui.unmount()
   })
 
