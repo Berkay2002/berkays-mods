@@ -18,7 +18,7 @@ export const logLines = (raw: string): ViewLine[] => {
   for (const l of text.split('\n')) {
     // A carriage return mid-line redrew the line: the last write is what showed.
     const line = (l.replace(/\r+$/, '').split('\r').pop() ?? '')
-      .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
+      .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
       .replace(/\s+$/, '')
       // Right-aligned status and the prompt box's rules are sized to its terminal, not this pane.
       .replace(/(\S) {3,}/g, '$1  ')
@@ -78,26 +78,34 @@ export const transcriptMessages = (jsonl: string): SessionMessage[] => {
   return msgs
 }
 
+// Transcript text is whatever the model, a tool or a file wrote: escape sequences and other control
+// characters are dropped so none reaches the terminal as a command; tabs become spaces.
+export const clean = (s: string): string =>
+  s
+    .replace(/(?:\x1b\[|\x9b)[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b.?/g, '')
+    .replace(/\t/g, '  ')
+    .replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, '')
+
 const KEYS = ['description', 'command', 'file_path', 'path', 'pattern', 'url', 'query', 'skill', 'prompt']
 
 /** A tool call in a few words: its first telling argument. */
 export const brief = (input: Record<string, unknown>): string => {
   const k = KEYS.find(k => typeof input[k] === 'string' && input[k])
   const v = k ? String(input[k]) : JSON.stringify(input)
-  return v.replace(/\s+/g, ' ').trim()
+  return clean(v.replace(/\s+/g, ' ')).trim()
 }
 
 /** `mcp__server__tool` reads as `tool (server)`. */
 const toolName = (t: string): string => {
   const m = /^mcp__(.+?)__(.+)$/.exec(t)
-  return m ? `${m[2]} (${m[1]!.replace(/^plugin_[^_]+_/, '')})` : t
+  return clean(m ? `${m[2]} (${m[1]!.replace(/^plugin_[^_]+_/, '')})` : t)
 }
 
 /** An agent's transcript as lines: prompts, replies, and one line per tool call, a gap before each block. */
 export const messageLines = (msgs: readonly SessionMessage[]): ViewLine[] => {
   const out: ViewLine[] = []
   const block = (kind: 'user' | 'text', text: string, max = Infinity) => {
-    const lines = text.trim().split('\n')
+    const lines = clean(text.replace(/\r\n?/g, '\n')).trim().split('\n')
     if (out.length) out.push({ kind: 'gap', text: '' })
     // Only a block's first line carries the mark.
     lines.slice(0, max).forEach((l, i) => out.push({ kind, text: l.replace(/\s+$/, ''), ...(i ? { isCont: true } : {}) }))

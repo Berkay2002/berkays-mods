@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 import { bgLaunches, parseWorktrees } from '../hooks/bg'
 import { crab, spriteOf, tierOf } from '../hooks/register'
 import { SPRITE_H, SPRITE_W, toText } from '../hooks/sprite'
-import { logLines, messageLines, transcriptMessages, wrapLines } from '../hooks/view'
+import { clean, logLines, messageLines, transcriptMessages, wrapLines } from '../hooks/view'
 import type { ViewLine } from '../types'
 
 describe('claude-config crew', () => {
@@ -279,6 +279,16 @@ describe('view pane', () => {
       'error:Bash x',
       'pending:Grep p',
     ])
+  })
+
+  test('escape sequences and control characters in a transcript never reach the terminal', async () => {
+    const evil = '\x1b]0;pwned\x07\x1b[2J\x1b[31mred\x1b[m\x9b6n\x07\tok\r\nnext'
+    const lines = messageLines([
+      { role: 'assistant', text: evil, toolUses: [{ tool_use_id: '1', tool: 'Bash\x1b[2J', input: { command: evil }, text: '' }] },
+    ])
+    for (const l of lines) expect(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(`${l.tool ?? ''}${l.text}`)).toBe(false)
+    expect(flat(lines)).toEqual(['text:red  ok', 'text:next', 'tool:Bash red ok next'])
+    expect(clean('a\x1bb')).toBe('a')
   })
 
   test('prose wraps at a space, continuations marked; tool lines stay one row', async () => {
