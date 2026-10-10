@@ -364,3 +364,41 @@ describe('view pane from the agents panel', () => {
     await v.unmount()
   })
 })
+
+describe('view pane scrolling', () => {
+  test('follows new lines at the end, stays put once the person scrolls up, follows again at the bottom', async ($, on) => {
+    const calls: string[][] = []
+    world(on, calls)
+    const scrolls: { origin: string; offset: number }[] = []
+    on('ui.scroll', (_$, e) => {
+      scrolls.push({ origin: e.origin.kind, offset: e.offset })
+      return {}
+    })
+    on('fs.list', () => ({ value: [] }) as never)
+    on('fs.exists', () => ({ value: false }) as never)
+    await $.session.start(START)
+    await $.command.run(OPEN)
+    const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+    await ui.press({ key: 'view-w' })
+    await ui.unmount()
+
+    const person = (offset: number) =>
+      $.ui.scroll({ component: 'Pane', requestId: 'savvy-view', offset, by: -1, bodyRows: 10, contentRows: 50, origin: { kind: 'person' } } as never)
+    const text = async () => {
+      const v = await $.ui.mount({ ...pane(60), requestId: 'savvy-view', surface: 'terminal' })
+      const all = (await v.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+      await v.unmount()
+      return all
+    }
+    expect(await text()).toContain('following new lines')
+    await person(12)
+    expect(await text()).toContain('scrolled up')
+    await person(40)
+    expect(await text()).toContain('following new lines')
+    // The person's moves went on to the engine untouched.
+    expect(scrolls).toEqual([
+      { origin: 'person', offset: 12 },
+      { origin: 'person', offset: 40 },
+    ])
+  })
+})

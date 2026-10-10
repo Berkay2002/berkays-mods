@@ -19,12 +19,15 @@ const frame = atom({ plugin: 'savvy-progress', key: 'frame' } as const, 0)
 const bg = atom({ plugin: 'savvy-progress', key: 'bg' } as const, [])
 const launches = atom({ plugin: 'savvy-progress', key: 'launches' } as const, {})
 const view = atom({ plugin: 'savvy-progress', key: 'view' } as const, null)
+const viewFollow = atom({ plugin: 'savvy-progress', key: 'viewFollow' } as const, true)
 
 const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const PANE = 'savvy-agents'
 const VIEW_PANE = 'savvy-view'
 const VIEW_EVERY_MS = 2000
+// The rows the view pane draws at most, newest last; the window scrolls over them.
+const VIEW_MAX_ROWS = 1500
 const BG_EVERY_MS = 5000
 const CRAB_EVERY_MS = 500
 const PHASES: readonly Phase[] = ['plan', 'design', 'delegate', 'review', 'close']
@@ -83,6 +86,8 @@ const STRINGS = {
     viewEmpty: 'Nothing yet.',
     attach: 'take it over:',
     fromLogs: 'from its terminal (no transcript found)',
+    scrollHint: 'wheel or ↑↓ PgUp PgDn to scroll · following new lines',
+    scrollBack: 'scrolled up: End (or scroll to the bottom) follows new lines again',
   },
   ru: {
     pane: 'Агенты',
@@ -120,6 +125,8 @@ const STRINGS = {
     viewEmpty: 'Пока пусто.',
     attach: 'перехватить:',
     fromLogs: 'из терминала (транскрипт не найден)',
+    scrollHint: 'колесо или ↑↓ PgUp PgDn для прокрутки · следует за новыми строками',
+    scrollBack: 'прокручено вверх: End (или вниз до конца) снова следует за новыми строками',
   },
 } as const
 
@@ -884,9 +891,12 @@ async function refreshView($: EngineInterface): Promise<void> {
         source = 'logs'
       }
     }
-    await update($, view, prev =>
-      prev && prev.id === v.id && (prev.source !== source || JSON.stringify(prev.lines) !== JSON.stringify(lines)) ? { ...prev, lines, source } : prev,
-    )
+    let isChanged = false
+    await update($, view, prev => {
+      isChanged = !!prev && prev.id === v.id && (prev.source !== source || JSON.stringify(prev.lines) !== JSON.stringify(lines))
+      return isChanged && prev ? { ...prev, lines, source } : prev
+    })
+    if (isChanged && (await read($, viewFollow))) await $.ui.scroll({ in: VIEW_PANE, to: 'end' }).catch(() => undefined)
   } catch (err) {
     const lines: ViewLine[] = [{ kind: 'error', text: clean(String(err)) }]
     await update($, view, prev => (prev && prev.id === v.id ? { ...prev, lines } : prev))
@@ -900,6 +910,7 @@ async function openView($: EngineInterface, raw: ViewTarget): Promise<void> {
   const target = { ...raw, name: clean(raw.name) }
   lastRead = ''
   await update($, view, () => ({ ...target, lines: [] }))
+  await update($, viewFollow, () => true)
   await $.ui.open({ id: VIEW_PANE, title: target.name.slice(0, 40) || target.id.slice(0, 8), focus: true, closeOnEscape: true })
   await refreshView($)
 }
@@ -1403,6 +1414,16 @@ export const register: Register = (on, options) => {
     )
   })
 
+  // The person scrolling the view pane: at the end it follows new lines, anywhere above it stays put.
+  on('ui.scroll', { component: 'Pane', requestId: VIEW_PANE }, async ($, e, next) => {
+    const moved = await next(e)
+    if (!moved.deny) {
+      const isAtEnd = e.offset >= e.contentRows - e.bodyRows
+      if ((await read($, viewFollow)) !== isAtEnd) await update($, viewFollow, () => isAtEnd)
+    }
+    return moved
+  })
+
   // One subagent's or background session's latest lines, newest at the bottom: a header with its state and
   // model, a rule, then prompts, replies and tool calls styled the way the transcript draws them.
   on('ui.render', { component: 'Pane', requestId: VIEW_PANE }, async ($, e) => {
@@ -1454,14 +1475,17 @@ export const register: Register = (on, options) => {
           {v.source === 'logs' ? ` · ${s.fromLogs}` : ''}
         </Text>
       ),
+      <Text key="h-keys" dimColor wrap="truncate-end">
+        {(await read($, viewFollow)) ? s.scrollHint : s.scrollBack}
+      </Text>,
       <Text key="h-rule" dimColor>
         {'─'.repeat(cols)}
       </Text>,
     ].filter(Boolean)
 
-    // ponytail: shows the tail that fits, no scrollback; `claude attach` (bg) has the whole session.
-    const room = Math.max(5, (e.props.scroll?.bodyRows || 40) - header.length)
-    const tail = wrapLines(v.lines, cols - 2).slice(-room)
+    // ponytail: the last VIEW_MAX_ROWS rows (of a background session, of its transcript's last 3.5 MB);
+    // `claude attach` has the whole session.
+    const tail = wrapLines(v.lines, cols - 2).slice(-VIEW_MAX_ROWS)
     while (tail[0]?.kind === 'gap') tail.shift()
     const line = (l: ViewLine, i: number) => {
       const key = `l${i}`
