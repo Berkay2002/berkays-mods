@@ -90,6 +90,8 @@ declare module 'claude-code' {
       launches: Record<string, { model?: string; effort?: string; agent?: string }>
       /** The view pane's target and its last read, as lines. */
       view: (ViewTarget & { lines: ViewLine[]; source?: 'transcript' | 'logs' }) | null
+      /** The view pane's window sits at the end: new lines scroll it down. Off once the person scrolls up. */
+      viewFollow: boolean
     }
   }
 }
