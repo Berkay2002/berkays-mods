@@ -4,7 +4,8 @@ import type { On } from 'claude-code'
 import { bgLaunches, parseWorktrees } from '../hooks/bg'
 import { crab, spriteOf, tierOf } from '../hooks/register'
 import { SPRITE_H, SPRITE_W, toText } from '../hooks/sprite'
-import { logLines, messageLines, wrapLines } from '../hooks/view'
+import { logLines, messageLines, transcriptMessages, wrapLines } from '../hooks/view'
+import type { ViewLine } from '../types'
 
 describe('claude-config crew', () => {
   test('scout, builder and reviewer are tiers of their own; savvy tiers still work; anything else is other', async () => {
@@ -82,7 +83,7 @@ const world = (on: On, calls: string[][] = [], agents = AGENTS) => {
   const panes: string[] = []
   on('session.id', () => ({ value: 'self' }))
   on('session.repo', () => ({ value: { root: '/repo', remote: null, internal: false, repository: null } }) as never)
-  on('env.get', () => ({ value: undefined }))
+  on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? '/home/me' : undefined }) as never)
   on('command.register', () => ({ value: { command: 'agents-info' } }))
   on('tool.register', () => ({ value: undefined }) as never)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -226,12 +227,14 @@ describe('agents panel', () => {
   })
 })
 
+const flat = (ls: ViewLine[]) => ls.map(l => (l.kind === 'gap' ? '' : `${l.kind}:${l.tool ? l.tool + ' ' : ''}${l.text}`))
+
 describe('view pane', () => {
   test('logs lose colors and cursor moves, keep the last redraw of a line, and squeeze blank runs', async () => {
     const raw = '\x1b[38;2;1;2;3mhello\x1b[m\r\n\x1b[K\r\n\r\n\x1b]0;title\x07a\x1b[2Cb\r\nold\rnew\r\n\r\n'
-    expect(logLines(raw)).toEqual(['hello', '', 'a  b', 'new'])
+    expect(flat(logLines(raw))).toEqual(['log:hello', '', 'log:a  b', 'log:new'])
     // Indents stay; wide gaps and the prompt box's rules shrink to fit the pane.
-    expect(logLines('    indented     then gap\n─────\n── name ───────❯\n')).toEqual(['    indented  then gap', '── name ───❯'])
+    expect(flat(logLines('    indented     then gap\n─────\n── name ───────❯\n'))).toEqual(['log:    indented  then gap', 'log:── name ───❯'])
   })
 
   test('an agent transcript reads as prompt, replies and tool calls', async () => {
@@ -247,20 +250,96 @@ describe('view pane', () => {
         ],
       },
       { role: 'user', text: '', toolUses: [], toolResults: [] },
+      { role: 'assistant', text: '', toolUses: [{ tool_use_id: '4', tool: 'mcp__plugin_x_rea__inspect', input: { path: 'p' }, text: '' }] },
     ])
-    expect(lines).toEqual(['❯ Do the task', '', '● On it.', '⎿ Bash(ls -la x)', '… Read(a.ts)', '✗ Edit(b.ts)'])
+    expect(flat(lines)).toEqual(['user:Do the task', '', 'text:On it.', 'tool:Bash ls -la x', 'pending:Read a.ts', 'error:Edit b.ts', 'tool:inspect (rea) p'])
   })
 
-  test('long lines wrap at a space, continuation indented', async () => {
-    expect(wrapLines(['aaaa bbbb cccc', 'short'], 10)).toEqual(['aaaa bbbb', '  cccc', 'short'])
-    expect(wrapLines(['x'.repeat(25)], 10)).toEqual(['x'.repeat(10), '  ' + 'x'.repeat(8), '  ' + 'x'.repeat(7)])
+  test('a transcript file: one block per entry, results close their calls, engine messages and a partial line skipped', async () => {
+    const jsonl = [
+      '{"partial": tr',
+      JSON.stringify({ type: 'user', message: { content: 'Read the brief' } }),
+      JSON.stringify({ type: 'user', message: { content: '<command-name>/rename</command-name>' } }),
+      JSON.stringify({ type: 'user', isMeta: true, message: { content: 'meta' } }),
+      JSON.stringify({ type: 'user', isCompactSummary: true, message: { content: 'This session is being continued' } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'hm' }] } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Reading.' }] } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'a' } }] } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'x' } }] } }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't2', content: 'no', is_error: true }] } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't3', name: 'Grep', input: { pattern: 'p' } }] } }),
+      JSON.stringify({ type: 'attachment' }),
+    ].join('\n')
+    expect(flat(messageLines(transcriptMessages(jsonl)))).toEqual([
+      'user:Read the brief',
+      '',
+      'text:Reading.',
+      'tool:Read a',
+      'error:Bash x',
+      'pending:Grep p',
+    ])
+  })
+
+  test('prose wraps at a space, continuations marked; tool lines stay one row', async () => {
+    const out = wrapLines(
+      [
+        { kind: 'text', text: 'aaaa bbbb cccc' },
+        { kind: 'tool', tool: 'Bash', text: 'x'.repeat(30) },
+        { kind: 'text', text: 'x'.repeat(25) },
+      ],
+      10,
+    )
+    expect(out.map(l => [l.text, l.isCont ?? false])).toEqual([
+      ['aaaa bbbb', false],
+      ['cccc', true],
+      ['x'.repeat(30), false],
+      ['x'.repeat(10), false],
+      ['x'.repeat(10), true],
+      ['x'.repeat(5), true],
+    ])
   })
 })
 
+// The launch the panel learns model and effort from, split so no shell guard reads this file as one.
+const LAUNCH = ['claude', '--bg', '--model sonnet --effort high --name x "build it"'].join(' ')
+
 describe('view pane from the agents panel', () => {
-  test("pressing a background row's name opens its terminal in the view pane", async ($, on) => {
+  test("pressing a background row's name opens its transcript in the view pane, with its state and model", async ($, on) => {
     const calls: string[][] = []
     world(on, calls)
+    const file = [
+      JSON.stringify({ type: 'user', message: { content: 'Build the thing' } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'dotnet build' } }] } }),
+    ].join('\n')
+    on('fs.list', () => ({ value: [] }) as never)
+    // The engine hands the hook the path in the OS's own spelling.
+    on('fs.exists', (_$, e) => ({ value: e.path.replace(/\\/g, '/').endsWith('/home/me/.claude/projects/E--Dev-repo-wt-x/w.jsonl') }) as never)
+    on('fs.stat', () => ({ value: { kind: 'file', size: file.length, mtimeMs: 1, isLink: false } }) as never)
+    on('fs.read', () => ({ value: file }) as never)
+    await $.session.start(START)
+    await $.tool.call({ tool: 'Bash', command: LAUNCH } as never)
+    await $.command.run(OPEN)
+    const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+    await ui.press({ key: 'view-w' })
+    await ui.unmount()
+    expect(calls.some(c => c[1] === 'logs')).toBe(false)
+
+    const v = await $.ui.mount({ ...pane(60), requestId: 'savvy-view', surface: 'terminal' })
+    const all = (await v.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    expect(all).toContain('busy')
+    expect(all).toContain('builder · Sonnet · high · feat-x')
+    expect(all).toContain('claude attach w')
+    expect(all).toContain('❯ Build the thing')
+    expect(all).toContain('dotnet build')
+    await v.unmount()
+  })
+
+  test('with no transcript to be found, a background session falls back to its terminal', async ($, on) => {
+    const calls: string[][] = []
+    world(on, calls)
+    on('fs.list', () => ({ value: [] }) as never)
+    on('fs.exists', () => ({ value: false }) as never)
     await $.session.start(START)
     await $.command.run(OPEN)
     const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
@@ -270,8 +349,8 @@ describe('view pane from the agents panel', () => {
 
     const v = await $.ui.mount({ ...pane(60), requestId: 'savvy-view', surface: 'terminal' })
     const all = (await v.findAll({ type: 'Text' })).map(t => t.text).join('\n')
-    expect(all).toContain('claude attach w')
     expect(all).toContain('working on it')
+    expect(all).toContain('no transcript found')
     await v.unmount()
   })
 })

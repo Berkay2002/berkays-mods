@@ -53,10 +53,22 @@ export type BgSession = {
   model?: string
   effort?: string
   branch?: string
+  /** Where it runs: its transcript lives under the projects folder named after it. */
+  cwd?: string
 }
 
 /** What the view pane shows: a subagent of this session (by agentId) or a background session (by session id). */
-export type ViewTarget = { kind: 'agent' | 'bg'; id: string; name: string }
+export type ViewTarget = { kind: 'agent' | 'bg'; id: string; name: string; cwd?: string }
+
+/** One row of the view pane: a prompt, reply prose, a tool call (done, in flight, failed), raw log text, or a gap. */
+export type ViewLine = {
+  kind: 'user' | 'text' | 'tool' | 'pending' | 'error' | 'log' | 'gap'
+  text: string
+  /** A tool line's tool. */
+  tool?: string
+  /** A wrapped line's later rows: drawn without the mark. */
+  isCont?: boolean
+}
 
 export type Panel = {
   isCompact: boolean
@@ -77,7 +89,7 @@ declare module 'claude-code' {
       /** What this session's own background launches asked for, by lowercase `--name`. */
       launches: Record<string, { model?: string; effort?: string; agent?: string }>
       /** The view pane's target and its last read, as lines. */
-      view: (ViewTarget & { lines: string[] }) | null
+      view: (ViewTarget & { lines: ViewLine[]; source?: 'transcript' | 'logs' }) | null
     }
   }
 }

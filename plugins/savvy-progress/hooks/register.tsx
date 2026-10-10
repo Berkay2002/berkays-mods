@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRun, BgSession, Flow, Panel, Phase, PlannedTask, ViewTarget } from '../types'
+import type { AgentRun, BgSession, Flow, Panel, Phase, PlannedTask, ViewLine, ViewTarget } from '../types'
 import { aliasLabel, bgLaunches, bgState, branchOf, isRelated, parseAgents, parseWorktrees, tierFor } from './bg'
-import { logLines, messageLines, wrapLines } from './view'
+import { logLines, messageLines, transcriptMessages, wrapLines } from './view'
 import { SPRITE_W, clawd } from './sprite'
 import type { Fill, Run } from './sprite'
 
@@ -81,7 +81,8 @@ const STRINGS = {
     session: 'session',
     view: 'View',
     viewEmpty: 'Nothing yet.',
-    attach: 'to take it over:',
+    attach: 'take it over:',
+    fromLogs: 'from its terminal (no transcript found)',
   },
   ru: {
     pane: 'Агенты',
@@ -117,7 +118,8 @@ const STRINGS = {
     session: 'сессия',
     view: 'Открыть',
     viewEmpty: 'Пока пусто.',
-    attach: 'чтобы перехватить:',
+    attach: 'перехватить:',
+    fromLogs: 'из терминала (транскрипт не найден)',
   },
 } as const
 
@@ -775,7 +777,7 @@ async function pollBg($: EngineInterface): Promise<void> {
       .slice(0, 24)
       .map(a => {
         const l = launched[a.name.toLowerCase()]
-        return { id: a.sessionId, name: a.name, state: bgState(a), tier: tierFor(l), model: l?.model, effort: l?.effort, branch: branchOf(a, trees) }
+        return { id: a.sessionId, name: a.name, state: bgState(a), tier: tierFor(l), model: l?.model, effort: l?.effort, branch: branchOf(a, trees), cwd: a.cwd }
       })
     const prev = await read($, bg)
     if (JSON.stringify(prev) !== JSON.stringify(list)) await update($, bg, () => list)
@@ -809,34 +811,92 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
 }
 
 // The view pane re-reads its target every VIEW_EVERY_MS while shown: an agent's transcript from this
-// session, a background session's terminal through `claude logs`.
+// session; a background session's transcript file (its tail), else its terminal through `claude logs`.
 let isViewing = false
+// Where each background session's transcript was found, and its mtime at the last read (skip when unchanged).
+const transcriptPaths = new Map<string, string>()
+let lastRead = ''
+
+// Bytes from the end: screenshots make single entries hundreds of KB, so a line count would see too little.
+const TAIL_BYTES = 3_500_000
+
+async function findTranscript($: EngineInterface, id: string, cwd?: string): Promise<string | null> {
+  const known = transcriptPaths.get(id)
+  if (known) return known
+  const config = await $.env.get('CLAUDE_CONFIG_DIR')
+  const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME'))
+  const root = `${config || `${home}/.claude`}/projects`
+  // The folder is the cwd with every other character a dash; a scan covers a name the engine shortened.
+  const guess = cwd ? [cwd.replace(/[^a-zA-Z0-9]/g, '-')] : []
+  const dirs = [...guess, ...(await $.fs.list(root).catch(() => [])).filter(d => d.kind === 'dir').map(d => d.name)]
+  for (const d of dirs) {
+    const path = `${root}/${d}/${id}.jsonl`
+    if (await $.fs.exists(path)) {
+      transcriptPaths.set(id, path)
+      return path
+    }
+  }
+  return null
+}
+
+// The file's last TAIL_BYTES: read whole when small, else `tail -c` (a seek in PowerShell on Windows, raw
+// bytes so no code page touches them); a file read rejects over 4 MiB. Null when unchanged since the last read.
+async function readTail($: EngineInterface, path: string): Promise<string | null> {
+  const st = await $.fs.stat(path)
+  const stamp = `${path}:${st.mtimeMs}:${st.size}`
+  if (stamp === lastRead) return null
+  let text: string
+  if (st.size <= TAIL_BYTES) text = await $.fs.read(path)
+  else {
+    const isWindows = /^[A-Za-z]:/.test(path)
+    const ps =
+      `$f=[IO.File]::Open('${path.replace(/'/g, "''")}','Open','Read','ReadWrite'); $n=[Math]::Min($f.Length,${TAIL_BYTES}); ` +
+      `[void]$f.Seek(-$n,'End'); $b=New-Object byte[] $n; [void]$f.Read($b,0,$n); $f.Close(); ` +
+      `$o=[Console]::OpenStandardOutput(); $o.Write($b,0,$n); $o.Flush()`
+    const argv = isWindows ? ['powershell', '-NoProfile', '-Command', ps] : ['tail', '-c', String(TAIL_BYTES), path]
+    const ran = await $.process.run(argv, { timeoutMs: 10_000 })
+    if (ran.exitCode !== 0) throw new Error(ran.stderr.trim() || 'tail failed')
+    text = ran.stdout
+  }
+  lastRead = stamp
+  return text
+}
 
 async function refreshView($: EngineInterface): Promise<void> {
   const v = await read($, view)
   if (!v || isViewing) return
   isViewing = true
   try {
-    let lines: string[]
+    let lines: ViewLine[]
+    let source: 'transcript' | 'logs' = 'transcript'
     if (v.kind === 'agent') {
       const found = await $.session.messages({ agentId: v.id })
-      lines = Array.isArray(found) ? messageLines(found) : [`(${found.deny})`]
+      lines = Array.isArray(found) ? messageLines(found) : [{ kind: 'error', text: found.deny }]
     } else {
-      // `claude logs` takes the short id `claude agents` prints, not the session id.
-      const ran = await $.process.run(['claude', 'logs', v.id.slice(0, 8)], { timeoutMs: 10_000 })
-      lines = ran.exitCode === 0 ? logLines(ran.stdout) : [`(claude logs: ${(ran.stderr || ran.stdout).trim()})`]
+      const path = await findTranscript($, v.id, v.cwd)
+      const text = path ? await readTail($, path) : undefined
+      if (text === null) return // unchanged
+      if (text !== undefined) lines = messageLines(transcriptMessages(text))
+      else {
+        // `claude logs` takes the short id `claude agents` prints, not the session id.
+        const ran = await $.process.run(['claude', 'logs', v.id.slice(0, 8)], { timeoutMs: 10_000 })
+        lines = ran.exitCode === 0 ? logLines(ran.stdout) : [{ kind: 'error', text: `claude logs: ${(ran.stderr || ran.stdout).trim()}` }]
+        source = 'logs'
+      }
     }
     await update($, view, prev =>
-      prev && prev.id === v.id && JSON.stringify(prev.lines) !== JSON.stringify(lines) ? { ...prev, lines } : prev,
+      prev && prev.id === v.id && (prev.source !== source || JSON.stringify(prev.lines) !== JSON.stringify(lines)) ? { ...prev, lines, source } : prev,
     )
   } catch (err) {
-    await update($, view, prev => (prev && prev.id === v.id ? { ...prev, lines: [`(${String(err)})`] } : prev))
+    const lines: ViewLine[] = [{ kind: 'error', text: String(err) }]
+    await update($, view, prev => (prev && prev.id === v.id ? { ...prev, lines } : prev))
   } finally {
     isViewing = false
   }
 }
 
 async function openView($: EngineInterface, target: ViewTarget): Promise<void> {
+  lastRead = ''
   await update($, view, () => ({ ...target, lines: [] }))
   await $.ui.open({ id: VIEW_PANE, title: target.name.slice(0, 40) || target.id.slice(0, 8), focus: true, closeOnEscape: true })
   await refreshView($)
@@ -1136,7 +1196,7 @@ export const register: Register = (on, options) => {
     let hot = 0
     const agentTarget = (a: AgentRun): ViewTarget | null =>
       a.agentId ? { kind: 'agent', id: a.agentId, name: a.description || a.type } : null
-    const bgTarget = (b: BgSession): ViewTarget => ({ kind: 'bg', id: b.id, name: b.name })
+    const bgTarget = (b: BgSession): ViewTarget => ({ kind: 'bg', id: b.id, name: b.name, cwd: b.cwd })
     const viewButton = (target: ViewTarget | null, text: string) => {
       if (!target) return <Text bold wrap="truncate-end">{text}</Text>
       const n = ++hot
@@ -1341,34 +1401,104 @@ export const register: Register = (on, options) => {
     )
   })
 
-  // One subagent's or background session's latest lines, newest at the bottom.
+  // One subagent's or background session's latest lines, newest at the bottom: a header with its state and
+  // model, a rule, then prompts, replies and tool calls styled the way the transcript draws them.
   on('ui.render', { component: 'Pane', requestId: VIEW_PANE }, async ($, e) => {
     const s = tr()
     const { Box, Text } = $.ui.resolve(e)
     const v = await read($, view)
     if (!v) return <Text dimColor>{s.viewEmpty}</Text>
     const cols = Math.max(20, e.props.bodyColumns || 60)
-    const header = v.kind === 'bg' ? 3 : 2
-    // ponytail: shows the tail that fits, no scrollback; `claude attach` (bg) has the whole session.
-    const room = Math.max(5, (e.props.scroll?.bodyRows || 40) - header)
-    const tail = wrapLines(v.lines, cols).slice(-room)
-    return (
-      <Box flexDirection="column">
+
+    // The header, from the row the panel holds for it.
+    let glyph = ''
+    let glyphColor: string | undefined
+    let state = ''
+    let meta: string[] = []
+    if (v.kind === 'bg') {
+      const b = (await read($, bg)).find(x => x.id === v.id)
+      if (b) {
+        glyph = BG_GLYPH[b.state]
+        glyphColor = b.state === 'waiting' ? 'warning' : b.state === 'busy' ? colorOf(b.tier) : undefined
+        state = bgStateText(b)
+        meta = [b.tier === 'other' ? s.session : b.tier, bgModel(b), b.branch ?? '']
+      }
+    } else {
+      const a = (await read($, agents)).find(x => x.agentId === v.id)
+      if (a) {
+        const tier = tierOf(a.type)
+        glyph = STATUS_GLYPH[a.status] ?? ''
+        glyphColor = a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : colorOf(tier)
+        state = a.status === 'running' ? s.isRunning : a.status === 'done' ? s.isFinished : s.failed
+        meta = [tier === 'other' ? a.type : tier, a.effort ? `${modelName(a.model)} · ${a.effort}` : modelName(a.model)]
+      }
+    }
+    const header = [
+      <Box key="h-name" flexDirection="row" gap={1}>
         <Text bold wrap="truncate-end">
           {v.name}
         </Text>
-        {v.kind === 'bg' && (
-          <Text dimColor wrap="truncate-end">
-            {s.attach} claude attach {v.id.slice(0, 8)}
+        {glyph && <Text color={glyphColor}>{glyph}</Text>}
+        {state && <Text dimColor>{state}</Text>}
+      </Box>,
+      meta.filter(Boolean).length > 0 && (
+        <Text key="h-meta" dimColor wrap="truncate-end">
+          {meta.filter(Boolean).join(' · ')}
+        </Text>
+      ),
+      v.kind === 'bg' && (
+        <Text key="h-attach" dimColor wrap="truncate-end">
+          {s.attach} <Text color={ACCENT}>claude attach {v.id.slice(0, 8)}</Text>
+          {v.source === 'logs' ? ` · ${s.fromLogs}` : ''}
+        </Text>
+      ),
+      <Text key="h-rule" dimColor>
+        {'─'.repeat(cols)}
+      </Text>,
+    ].filter(Boolean)
+
+    // ponytail: shows the tail that fits, no scrollback; `claude attach` (bg) has the whole session.
+    const room = Math.max(5, (e.props.scroll?.bodyRows || 40) - header.length)
+    const tail = wrapLines(v.lines, cols - 2).slice(-room)
+    while (tail[0]?.kind === 'gap') tail.shift()
+    const line = (l: ViewLine, i: number) => {
+      const key = `l${i}`
+      if (l.kind === 'gap') return <Text key={key}> </Text>
+      if (l.kind === 'tool' || l.kind === 'pending' || l.kind === 'error') {
+        const mark = l.kind === 'error' ? '✗' : l.kind === 'pending' ? '◌' : '⎿'
+        const color = l.kind === 'error' ? 'red' : l.kind === 'pending' ? 'warning' : DONE
+        return (
+          <Text key={key} wrap="truncate-end">
+            <Text color={color}>{mark} </Text>
+            {l.tool && <Text bold>{l.tool} </Text>}
+            <Text dimColor>{l.text}</Text>
           </Text>
-        )}
-        <Text> </Text>
-        {tail.length === 0 && <Text dimColor>{s.viewEmpty}</Text>}
-        {tail.map((l, i) => (
-          <Text key={`l${i}`} wrap="truncate-end" dimColor={/^\s*[⎿…]/.test(l)} color={/^\s*✗/.test(l) ? 'red' : undefined}>
-            {l || ' '}
+        )
+      }
+      if (l.kind === 'user')
+        return (
+          <Text key={key} wrap="truncate-end" color={ACCENT}>
+            {l.isCont ? '  ' : '❯ '}
+            {l.text}
           </Text>
-        ))}
+        )
+      if (l.kind === 'log')
+        return (
+          <Text key={key} wrap="truncate-end">
+            {l.text || ' '}
+          </Text>
+        )
+      return (
+        <Text key={key} wrap="truncate-end">
+          {l.isCont ? '  ' : '● '}
+          {l.text || ' '}
+        </Text>
+      )
+    }
+    return (
+      <Box flexDirection="column">
+        {header}
+        {tail.length === 0 ? <Text dimColor>{s.viewEmpty}</Text> : tail.map(line)}
       </Box>
     )
   })
