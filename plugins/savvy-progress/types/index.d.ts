@@ -55,6 +55,9 @@ export type BgSession = {
   branch?: string
 }
 
+/** What the view pane shows: a subagent of this session (by agentId) or a background session (by session id). */
+export type ViewTarget = { kind: 'agent' | 'bg'; id: string; name: string }
+
 export type Panel = {
   isCompact: boolean
   isDoneCollapsed: boolean
@@ -73,6 +76,8 @@ declare module 'claude-code' {
       bg: BgSession[]
       /** What this session's own background launches asked for, by lowercase `--name`. */
       launches: Record<string, { model?: string; effort?: string; agent?: string }>
+      /** The view pane's target and its last read, as lines. */
+      view: (ViewTarget & { lines: string[] }) | null
     }
   }
 }
