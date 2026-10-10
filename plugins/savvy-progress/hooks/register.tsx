@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentRun, BgSession, Flow, Panel, Phase, PlannedTask, ViewLine, ViewTarget } from '../types'
 import { aliasLabel, bgLaunches, bgState, branchOf, isRelated, parseAgents, parseWorktrees, tierFor } from './bg'
-import { logLines, messageLines, transcriptMessages, wrapLines } from './view'
+import { clean, logLines, messageLines, transcriptMessages, wrapLines } from './view'
 import { SPRITE_W, clawd } from './sprite'
 import type { Fill, Run } from './sprite'
 
@@ -880,7 +880,7 @@ async function refreshView($: EngineInterface): Promise<void> {
       else {
         // `claude logs` takes the short id `claude agents` prints, not the session id.
         const ran = await $.process.run(['claude', 'logs', v.id.slice(0, 8)], { timeoutMs: 10_000 })
-        lines = ran.exitCode === 0 ? logLines(ran.stdout) : [{ kind: 'error', text: `claude logs: ${(ran.stderr || ran.stdout).trim()}` }]
+        lines = ran.exitCode === 0 ? logLines(ran.stdout) : [{ kind: 'error', text: `claude logs: ${clean(ran.stderr || ran.stdout).trim()}` }]
         source = 'logs'
       }
     }
@@ -888,14 +888,16 @@ async function refreshView($: EngineInterface): Promise<void> {
       prev && prev.id === v.id && (prev.source !== source || JSON.stringify(prev.lines) !== JSON.stringify(lines)) ? { ...prev, lines, source } : prev,
     )
   } catch (err) {
-    const lines: ViewLine[] = [{ kind: 'error', text: String(err) }]
+    const lines: ViewLine[] = [{ kind: 'error', text: clean(String(err)) }]
     await update($, view, prev => (prev && prev.id === v.id ? { ...prev, lines } : prev))
   } finally {
     isViewing = false
   }
 }
 
-async function openView($: EngineInterface, target: ViewTarget): Promise<void> {
+async function openView($: EngineInterface, raw: ViewTarget): Promise<void> {
+  // A session names itself: the name reaches the tab title and the header, so it is cleaned too.
+  const target = { ...raw, name: clean(raw.name) }
   lastRead = ''
   await update($, view, () => ({ ...target, lines: [] }))
   await $.ui.open({ id: VIEW_PANE, title: target.name.slice(0, 40) || target.id.slice(0, 8), focus: true, closeOnEscape: true })
