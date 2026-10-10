@@ -4,6 +4,7 @@ import type { On } from 'claude-code'
 import { bgLaunches, parseWorktrees } from '../hooks/bg'
 import { crab, spriteOf, tierOf } from '../hooks/register'
 import { SPRITE_H, SPRITE_W, toText } from '../hooks/sprite'
+import { logLines, messageLines, wrapLines } from '../hooks/view'
 
 describe('claude-config crew', () => {
   test('scout, builder and reviewer are tiers of their own; savvy tiers still work; anything else is other', async () => {
@@ -97,6 +98,7 @@ const world = (on: On, calls: string[][] = [], agents = AGENTS) => {
   on('tool.call', () => ({ result: {}, text: '' }) as never)
   on('process.run', (_$, e) => {
     calls.push([...e.argv])
+    if (e.argv[1] === 'logs') return out('\x1b[1mworking on it\x1b[m\r\n\x1b[K\r\n')
     return out(e.argv[0] === 'claude' ? agents : WORKTREES)
   })
   return clock
@@ -221,5 +223,55 @@ describe('agents panel', () => {
     const all = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
     expect(all).toContain('session · —')
     await ui.unmount()
+  })
+})
+
+describe('view pane', () => {
+  test('logs lose colors and cursor moves, keep the last redraw of a line, and squeeze blank runs', async () => {
+    const raw = '\x1b[38;2;1;2;3mhello\x1b[m\r\n\x1b[K\r\n\r\n\x1b]0;title\x07a\x1b[2Cb\r\nold\rnew\r\n\r\n'
+    expect(logLines(raw)).toEqual(['hello', '', 'a  b', 'new'])
+    // Indents stay; wide gaps and the prompt box's rules shrink to fit the pane.
+    expect(logLines('    indented     then gap\n─────\n── name ───────❯\n')).toEqual(['    indented  then gap', '── name ───❯'])
+  })
+
+  test('an agent transcript reads as prompt, replies and tool calls', async () => {
+    const lines = messageLines([
+      { role: 'user', text: 'Do the task', toolUses: [] },
+      {
+        role: 'assistant',
+        text: 'On it.',
+        toolUses: [
+          { tool_use_id: '1', tool: 'Bash', input: { command: 'ls  -la\nx' }, text: 'ok' },
+          { tool_use_id: '2', tool: 'Read', input: { file_path: 'a.ts' } },
+          { tool_use_id: '3', tool: 'Edit', input: { file_path: 'b.ts' }, text: 'no', isError: true },
+        ],
+      },
+      { role: 'user', text: '', toolUses: [], toolResults: [] },
+    ])
+    expect(lines).toEqual(['❯ Do the task', '', '● On it.', '⎿ Bash(ls -la x)', '… Read(a.ts)', '✗ Edit(b.ts)'])
+  })
+
+  test('long lines wrap at a space, continuation indented', async () => {
+    expect(wrapLines(['aaaa bbbb cccc', 'short'], 10)).toEqual(['aaaa bbbb', '  cccc', 'short'])
+    expect(wrapLines(['x'.repeat(25)], 10)).toEqual(['x'.repeat(10), '  ' + 'x'.repeat(8), '  ' + 'x'.repeat(7)])
+  })
+})
+
+describe('view pane from the agents panel', () => {
+  test("pressing a background row's name opens its terminal in the view pane", async ($, on) => {
+    const calls: string[][] = []
+    world(on, calls)
+    await $.session.start(START)
+    await $.command.run(OPEN)
+    const ui = await $.ui.mount({ ...pane(60), surface: 'terminal' })
+    await ui.press({ key: 'view-w' })
+    await ui.unmount()
+    expect(calls).toContainEqual(['claude', 'logs', 'w'])
+
+    const v = await $.ui.mount({ ...pane(60), requestId: 'savvy-view', surface: 'terminal' })
+    const all = (await v.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    expect(all).toContain('claude attach w')
+    expect(all).toContain('working on it')
+    await v.unmount()
   })
 })

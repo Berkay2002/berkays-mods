@@ -1,8 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRun, BgSession, Flow, Panel, Phase, PlannedTask } from '../types'
+import type { AgentRun, BgSession, Flow, Panel, Phase, PlannedTask, ViewTarget } from '../types'
 import { aliasLabel, bgLaunches, bgState, branchOf, isRelated, parseAgents, parseWorktrees, tierFor } from './bg'
+import { logLines, messageLines, wrapLines } from './view'
 import { SPRITE_W, clawd } from './sprite'
 import type { Fill, Run } from './sprite'
 
@@ -17,10 +18,13 @@ const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
 const frame = atom({ plugin: 'savvy-progress', key: 'frame' } as const, 0)
 const bg = atom({ plugin: 'savvy-progress', key: 'bg' } as const, [])
 const launches = atom({ plugin: 'savvy-progress', key: 'launches' } as const, {})
+const view = atom({ plugin: 'savvy-progress', key: 'view' } as const, null)
 
 const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
 const PANE = 'savvy-agents'
+const VIEW_PANE = 'savvy-view'
+const VIEW_EVERY_MS = 2000
 const BG_EVERY_MS = 5000
 const CRAB_EVERY_MS = 500
 const PHASES: readonly Phase[] = ['plan', 'design', 'delegate', 'review', 'close']
@@ -75,6 +79,9 @@ const STRINGS = {
     bgIdle: 'idle',
     bgWaiting: 'waiting for you',
     session: 'session',
+    view: 'View',
+    viewEmpty: 'Nothing yet.',
+    attach: 'to take it over:',
   },
   ru: {
     pane: 'Агенты',
@@ -108,6 +115,9 @@ const STRINGS = {
     bgIdle: 'простаивает',
     bgWaiting: 'ждёт вас',
     session: 'сессия',
+    view: 'Открыть',
+    viewEmpty: 'Пока пусто.',
+    attach: 'чтобы перехватить:',
   },
 } as const
 
@@ -798,6 +808,40 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
   void pollBg($)
 }
 
+// The view pane re-reads its target every VIEW_EVERY_MS while shown: an agent's transcript from this
+// session, a background session's terminal through `claude logs`.
+let isViewing = false
+
+async function refreshView($: EngineInterface): Promise<void> {
+  const v = await read($, view)
+  if (!v || isViewing) return
+  isViewing = true
+  try {
+    let lines: string[]
+    if (v.kind === 'agent') {
+      const found = await $.session.messages({ agentId: v.id })
+      lines = Array.isArray(found) ? messageLines(found) : [`(${found.deny})`]
+    } else {
+      // `claude logs` takes the short id `claude agents` prints, not the session id.
+      const ran = await $.process.run(['claude', 'logs', v.id.slice(0, 8)], { timeoutMs: 10_000 })
+      lines = ran.exitCode === 0 ? logLines(ran.stdout) : [`(claude logs: ${(ran.stderr || ran.stdout).trim()})`]
+    }
+    await update($, view, prev =>
+      prev && prev.id === v.id && JSON.stringify(prev.lines) !== JSON.stringify(lines) ? { ...prev, lines } : prev,
+    )
+  } catch (err) {
+    await update($, view, prev => (prev && prev.id === v.id ? { ...prev, lines: [`(${String(err)})`] } : prev))
+  } finally {
+    isViewing = false
+  }
+}
+
+async function openView($: EngineInterface, target: ViewTarget): Promise<void> {
+  await update($, view, () => ({ ...target, lines: [] }))
+  await $.ui.open({ id: VIEW_PANE, title: target.name.slice(0, 40) || target.id.slice(0, 8), focus: true, closeOnEscape: true })
+  await refreshView($)
+}
+
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -859,6 +903,12 @@ export const register: Register = (on, options) => {
       void (async () => {
         const f = await read($, flow)
         if ((await $.ui.panes()).some(p => p.id === PANE) || (f && !f.isFinished)) await pollBg($)
+      })()
+    })
+
+    $.clock.every(VIEW_EVERY_MS, () => {
+      void (async () => {
+        if ((await $.ui.panes()).some(p => p.id === VIEW_PANE && p.isShown)) await refreshView($)
       })()
     })
 
@@ -1082,6 +1132,24 @@ export const register: Register = (on, options) => {
       />
     )
     const isEmpty = list.length === 0 && planned.length === 0 && sessions.length === 0
+    // A row's name opens the view pane; the first nine also by digit while the pane holds the keys.
+    let hot = 0
+    const agentTarget = (a: AgentRun): ViewTarget | null =>
+      a.agentId ? { kind: 'agent', id: a.agentId, name: a.description || a.type } : null
+    const bgTarget = (b: BgSession): ViewTarget => ({ kind: 'bg', id: b.id, name: b.name })
+    const viewButton = (target: ViewTarget | null, text: string) => {
+      if (!target) return <Text bold wrap="truncate-end">{text}</Text>
+      const n = ++hot
+      return (
+        <Button key={`view-${target.id}`} plain {...(n <= 9 ? { hotkey: String(n) } : {})} onPress={() => void openView($, target)}>
+          <Text bold>{text}</Text>
+        </Button>
+      )
+    }
+    const desktopView = (target: ViewTarget | null) =>
+      target && (
+        <Button key={`view-${target.id}`} plain dimColor label={`${s.view} ${target.name} ›`} onPress={() => void openView($, target)} />
+      )
     const summary = `≈${fmtCost(t.cost)}, ${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
@@ -1107,18 +1175,21 @@ export const register: Register = (on, options) => {
           {toggleCompact}
           {isEmpty && <Text dimColor>{s.empty}</Text>}
           {running.length > 0 && section('h-run', `${s.running} · ${running.length}`)}
-          {running.map(a => (
-            <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />
-          ))}
+          {running.map(a => [
+            <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />,
+            desktopView(agentTarget(a)),
+          ])}
           {finished.length > 0 && toggleDone}
           {!p.isDoneCollapsed &&
-            finished.map(a => (
-              <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={66} />
-            ))}
+            finished.map(a => [
+              <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={66} />,
+              desktopView(agentTarget(a)),
+            ])}
           {sessions.length > 0 && section('h-bg', `${s.background} · ${sessions.length}`)}
-          {sessions.map(b => (
-            <Svg key={`bg-${b.id}`} source={bgSvg(W, b)} alt={`${b.name}: ${bgStateText(b)}`} width={W} height={46} />
-          ))}
+          {sessions.map(b => [
+            <Svg key={`bg-${b.id}`} source={bgSvg(W, b)} alt={`${b.name}: ${bgStateText(b)}`} width={W} height={46} />,
+            desktopView(bgTarget(b)),
+          ])}
           {planned.length > 0 && section('h-plan', `${s.planned} · ${planned.length}`)}
           {planned.map(pl => (
             <Svg key={`plan-${pl.n}`} source={plannedSvg(W, pl)} alt={`${pl.n}. ${pl.title}: ${s.isPlanned}`} width={W} height={46} />
@@ -1158,9 +1229,7 @@ export const register: Register = (on, options) => {
         <>
           <Box flexDirection="row" gap={1}>
             {!hasCrab && <Text color={color}>▣</Text>}
-            <Text bold wrap="truncate-end">
-              {b.name}
-            </Text>
+            {viewButton(bgTarget(b), b.name)}
             <Text color={b.state === 'waiting' ? 'warning' : b.state === 'busy' ? color : undefined} dimColor={b.state === 'idle'}>
               {BG_GLYPH[b.state]}
             </Text>
@@ -1191,9 +1260,7 @@ export const register: Register = (on, options) => {
         <>
           <Box flexDirection="row" gap={1}>
             {!hasCrab && <Text color={color}>▣</Text>}
-            <Text bold wrap="truncate-end">
-              {a.description || a.type}
-            </Text>
+            {viewButton(agentTarget(a), a.description || a.type)}
             <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : color}>{STATUS_GLYPH[a.status]}</Text>
           </Box>
           <Text dimColor wrap="truncate-end">
@@ -1270,6 +1337,38 @@ export const register: Register = (on, options) => {
             })}
           </Box>
         )}
+      </Box>
+    )
+  })
+
+  // One subagent's or background session's latest lines, newest at the bottom.
+  on('ui.render', { component: 'Pane', requestId: VIEW_PANE }, async ($, e) => {
+    const s = tr()
+    const { Box, Text } = $.ui.resolve(e)
+    const v = await read($, view)
+    if (!v) return <Text dimColor>{s.viewEmpty}</Text>
+    const cols = Math.max(20, e.props.bodyColumns || 60)
+    const header = v.kind === 'bg' ? 3 : 2
+    // ponytail: shows the tail that fits, no scrollback; `claude attach` (bg) has the whole session.
+    const room = Math.max(5, (e.props.scroll?.bodyRows || 40) - header)
+    const tail = wrapLines(v.lines, cols).slice(-room)
+    return (
+      <Box flexDirection="column">
+        <Text bold wrap="truncate-end">
+          {v.name}
+        </Text>
+        {v.kind === 'bg' && (
+          <Text dimColor wrap="truncate-end">
+            {s.attach} claude attach {v.id.slice(0, 8)}
+          </Text>
+        )}
+        <Text> </Text>
+        {tail.length === 0 && <Text dimColor>{s.viewEmpty}</Text>}
+        {tail.map((l, i) => (
+          <Text key={`l${i}`} wrap="truncate-end" dimColor={/^\s*[⎿…]/.test(l)} color={/^\s*✗/.test(l) ? 'red' : undefined}>
+            {l || ' '}
+          </Text>
+        ))}
       </Box>
     )
   })
