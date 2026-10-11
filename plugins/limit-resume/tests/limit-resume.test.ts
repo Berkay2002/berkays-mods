@@ -12,10 +12,26 @@ const AGENTS = [
   { pid: 3, sessionId: 'pdf-id', name: 'brf-app-pdf', status: 'busy' },
 ]
 
-function world(on: On, limits: SessionRateLimit[], stored?: Record<string, unknown>) {
+const CONFIG = 'C:/Users/me/.claude/usage-window.json'
+const LIMITS = 'C:/Users/me/.claude/usage/limits.json'
+// The engine hands fs paths over in the host's separators.
+const fwd = (p: string) => p.split('\\').join('/')
+
+// config.value is ~/.claude/usage-window.json's content (undefined: no file); a test may change it between events.
+function world(on: On, limits: SessionRateLimit[], stored?: Record<string, unknown>, config: { value?: unknown } = {}) {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on, stored)
-  const seen = { status: [] as (string | undefined)[], tail: undefined as string | undefined, toasts: [] as string[], prompts: [] as string[], sends: [] as unknown[] }
+  mock.env(on, { USERPROFILE: 'C:\\Users\\me', OS: 'Windows_NT' })
+  const files = new Map<string, string>()
+  const seen = { status: [] as (string | undefined)[], tail: undefined as string | undefined, toasts: [] as string[], prompts: [] as string[], sends: [] as unknown[], files, moves: [] as string[][] }
+  on('fs.read', (_$, e) => {
+    if (fwd(e.path) === CONFIG && config.value !== undefined) return { value: JSON.stringify(config.value) }
+    throw new Error('ENOENT')
+  })
+  on('fs.write', (_$, e) => {
+    files.set(fwd(e.path), e.text)
+    return { value: undefined }
+  })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'me' }))
   on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 200000 }, rateLimits: limits } }))
@@ -45,9 +61,19 @@ function world(on: On, limits: SessionRateLimit[], stored?: Record<string, unkno
     seen.sends.push(e.to)
     return { isDelivered: true as const }
   })
-  on('process.run', () => ({
-    value: { exitCode: 0, stdout: JSON.stringify(AGENTS), stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
-  }))
+  on('process.run', (_$, e) => {
+    const argv = [...e.argv]
+    if (argv[0] === 'cmd') {
+      seen.moves.push(argv)
+      const [from, to] = [fwd(argv[4] ?? ''), fwd(argv[5] ?? '')]
+      files.set(to, files.get(from) ?? '')
+      files.delete(from)
+      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    return {
+      value: { exitCode: 0, stdout: JSON.stringify(AGENTS), stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+    }
+  })
   return { clock, seen }
 }
 
@@ -171,4 +197,123 @@ test('/limits lists both windows and the pending resume', async ($, on) => {
   expect(lines[0]).toMatch(/^5h 100% · resets \d\d:\d\d$/)
   expect(lines[1]).toBe('Week 61%')
   expect(lines[2]).toMatch(/^⏸ resumes \d\d:\d\d$/)
+})
+
+const at = (percentUsed: number): SessionRateLimit[] => [
+  { kind: 'five_hour', percentUsed, resetsAt: iso(RESET) },
+  { kind: 'seven_day', percentUsed: 61 },
+]
+const submit = ($: Engine) => $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } })
+const limitsCommand = ($: Engine) =>
+  $.command.run({ command: 'limits', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+const WINDOW = { pausePercent: 98, resumeDelayMinutes: 3, peers: ['vokko-vice', 'inkwell'] }
+
+test('without usage-window.json 98% does not pause and nothing about a window is added', async ($, on) => {
+  const { clock, seen } = world(on, at(98))
+  await start($)
+  await measure($, at(98))
+  expect(seen.toasts).toEqual([])
+  expect(seen.status.at(-1)).toBeUndefined()
+  const r = await submit($)
+  expect(r.context).toEqual([expect.stringMatching(/^Usage: 5h 98% \(resets \d\d:\d\d\), week 61%$/)])
+  expect(((await limitsCommand($)).text ?? '').split('\n').length).toBe(3)
+  // A cut still resumes one minute past the reset.
+  await measure($, at(100))
+  await clock.set(RESET + 59_000)
+  expect(seen.prompts).toEqual(['hello'])
+  await clock.advance(2_000)
+  expect(seen.prompts).toEqual(['hello', 'Continue. The usage limit has reset.'])
+})
+
+test('the 5h window at pausePercent pauses once, and the note tells Claude to stop', async ($, on) => {
+  const config: { value?: unknown } = {}
+  const { seen } = world(on, at(98), undefined, config)
+  await start($)
+  await measure($, at(98))
+  expect(seen.toasts).toEqual([])
+  // An edit to the file applies on the next event, no restart.
+  config.value = WINDOW
+  await measure($, at(98))
+  expect(seen.toasts).toEqual([expect.stringMatching(/^Usage window: 5h at 98% · pausing · resuming at \d\d:\d\d$/)])
+  expect(seen.status.at(-1)).toMatch(/^⏸ paused · resumes \d\d:\d\d$/)
+  const r = await submit($)
+  expect(r.context?.[1]).toMatch(
+    /^Usage window: 5h at 98% \(pause at 98%\)\. Pause now: stop your workers and peers per the Usage window rule in CLAUDE\.md; auto-resume at \d\d:\d\d\. Peers: vokko-vice, inkwell\.$/,
+  )
+  // Already pending: a higher reading does not pause again.
+  await measure($, at(99))
+  expect(seen.toasts.length).toBe(1)
+})
+
+test('a pause resumes at the reset plus resumeDelayMinutes, even after Claude answered', async ($, on) => {
+  const { clock, seen } = world(on, at(98), undefined, { value: WINDOW })
+  await start($)
+  await measure($, at(98))
+  await $.turn.complete({ answer: 'stopped workers', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.set(RESET + 3 * 60_000 - 1_000)
+  expect(seen.prompts).toEqual([])
+  await clock.advance(2_000)
+  expect(seen.prompts).toEqual(['Continue. The usage limit has reset.'])
+  expect(seen.toasts.at(-1)).toBe('Resumed')
+})
+
+test('nothing resumes after until, and the note says the run is over', async ($, on) => {
+  const until = new Date(RESET + 30_000).toISOString()
+  const { clock, seen } = world(on, [], undefined, { value: { ...WINDOW, until } })
+  await start($)
+  await $.session.send({ to: 'brf-app-ui', text: 'hi', origin: { kind: 'model' } })
+  await measure($, at(100))
+  expect(seen.toasts.at(-1)).toMatch(/^Usage limit reached · no resume, the window ends \d\d:\d\d$/)
+  expect(seen.status.at(-1)).toMatch(/^⏸ limit · no resume · window ends \d\d:\d\d · 1 worker$/)
+  await clock.set(RESET + 2 * 60 * 60_000)
+  expect(seen.prompts).toEqual([])
+  expect(seen.sends).toEqual(['brf-app-ui'])
+  expect(seen.toasts.at(-1)).toBe(`Usage window ended at ${until}: not resuming`)
+  const r = await submit($)
+  expect(r.context?.at(-1)).toBe(`Usage window ended at ${until}: stop all work and workers.`)
+  expect(((await limitsCommand($)).text ?? '').split('\n').at(-1)).toMatch(/^Window ended \d\d:\d\d · no auto-resume$/)
+})
+
+test('/limits shows the active window', async ($, on) => {
+  world(on, at(42), undefined, { value: { ...WINDOW, until: new Date(RESET + 6 * 60 * 60_000).toISOString() } })
+  await start($)
+  const lines = ((await limitsCommand($)).text ?? '').split('\n')
+  expect(lines.at(-1)).toMatch(/^Window: pause at 98% · resume reset \+3m · ends \d\d:\d\d · peers vokko-vice, inkwell$/)
+})
+
+test('the current limits are published to ~/.claude/usage/limits.json through a rename', async ($, on) => {
+  const { clock, seen } = world(on, at(42))
+  await start($)
+  expect(JSON.parse(seen.files.get(LIMITS) ?? 'null')).toEqual({
+    fiveHour: { percentUsed: 42, resetsAt: iso(RESET) },
+    week: { percentUsed: 61, resetsAt: null },
+    updatedAt: iso(NOW),
+  })
+  const native = (p: string) => p.split('/').join('\\')
+  expect(seen.moves).toEqual([['cmd', '/c', 'move', '/y', native(`${LIMITS}.me.tmp`), native(LIMITS)]])
+  expect([...seen.files.keys()]).toEqual([LIMITS])
+  await clock.advance(60_000)
+  await measure($, at(57))
+  const after = JSON.parse(seen.files.get(LIMITS) ?? 'null')
+  expect(after.fiveHour.percentUsed).toBe(57)
+  expect(after.updatedAt).toBe(iso(NOW + 60_000))
+})
+
+test('warnPercent toasts once per window and the note asks to warn peers', async ($, on) => {
+  const { seen } = world(on, at(91), undefined, { value: { ...WINDOW, warnPercent: 90 } })
+  await start($)
+  await measure($, at(89))
+  expect(seen.toasts).toEqual([])
+  await measure($, at(90))
+  await measure($, at(91))
+  expect(seen.toasts).toEqual(['Usage window: 5h at 90% · warn peers (near limit)'])
+  const r = await submit($)
+  expect(r.context?.[1]).toBe('Usage window: 5h at 91%, warn peers (NEAR LIMIT) per CLAUDE.md. Peers: vokko-vice, inkwell.')
+  // The next window warns again.
+  const next = iso(RESET + 5 * 60 * 60_000)
+  await measure($, [{ kind: 'five_hour', percentUsed: 92, resetsAt: next }])
+  expect(seen.toasts.length).toBe(2)
+  // At pausePercent the pause takes over the note.
+  await measure($, [{ kind: 'five_hour', percentUsed: 98, resetsAt: next }])
+  expect(seen.toasts.at(-1)).toMatch(/^Usage window: 5h at 98% · pausing/)
 })
