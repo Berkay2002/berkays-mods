@@ -1,10 +1,23 @@
 {
   "name": "cache-tax",
-  "description": "Keeps the one-hour prompt cache warm during breaks (/keepwarm) and shows a cold send's estimated rewrite cost; this copy warns by default instead of refusing. Warming costs tokens. Copy of karanb192/cache-tax 2.2.1.",
+  "description": "Keeps the one-hour prompt cache warm during breaks (/keepwarm) and shows a cold send's estimated rewrite cost; this copy warns by default instead of asking. Warming costs tokens. Copy of karanb192/cache-tax 2.4.0 (b05ec14).",
   "author": {
     "name": "Karan Bansal"
   },
   "license": "MIT",
   "homepage": "https://github.com/karanb192/cache-tax",
-  "repository": "https://github.com/Berkay2002/berkays-mods"
+  "repository": "https://github.com/Berkay2002/berkays-mods",
+  "userConfig": {
+    "autoWarm": {
+      "type": "string",
+      "title": "Auto keepwarm",
+      "description": "on: after you pay a cold cache write, keepwarm arms itself for eight hours (the default). off: keepwarm only runs when you arm it with /keepwarm.",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    }
+  },
+  "types": "./types/index.d.ts"
 }
