@@ -19,14 +19,6 @@
 >   next turn resumes`); the window and `always` stay as they are, and your next turn resumes the schedule.
 > - a **weekly usage pause**: before each ping the weekly limit is read, and at 75% or more the ping (and the judge call) is
 >   skipped (`keepwarm paused: weekly usage 76%`); it re-checks at the next ping time and resumes by itself. No reading pings as usual.
-> - **auto-compact before cold**: when the main session is idle and its context is 100k tokens or more, it is compacted
->   (`/compact`, through the mod API's `$.session.compact`) 5 minutes before its one-hour prompt cache would go cold, so
->   the next message re-writes a short summary instead of the whole context. At most once per idle stretch; a starting turn
->   cancels it and the next turn re-arms it. While keepwarm pings succeed the cache never goes cold, so it fires only once
->   the pings stop (judge says done, idle cap, usage pause, window end). The engine refuses it while a turn runs.
->   `/cache-tax compact off` switches it off for good on this device, `/cache-tax compact 150k` sets another threshold,
->   `/cache-tax compact on` restores 100k. It assumes the one-hour TTL. Under a five-minute TTL (usage overage) it runs on an
->   already-expired cache, so it pays a full uncached read of the whole context for the summary, once per idle stretch.
 >
 > Install it from this marketplace (`claude plugin install cache-tax@berkays-mods`), not with the commands below.
 

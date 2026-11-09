@@ -37,11 +37,11 @@ type JudgeAnswer = string | ModelCompleteResult | 'throw'
 
 // berkays-mods: upstream's tests assume upstream's defaults: always off and the guard asking first.
 // A store without one of these keys reads as that default, unless a test asks for a fresh store.
-const UPSTREAM_DEFAULTS: Record<string, unknown> = { always: false, guard: 'refuse', compact: false }
+const UPSTREAM_DEFAULTS: Record<string, unknown> = { always: false, guard: 'refuse' }
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { pins?: Record<string, unknown>; compactSkip?: string; judge?: JudgeAnswer[]; fresh?: boolean; weekly?: { pct: number | null }; store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void> } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { pins?: Record<string, unknown>; judge?: JudgeAnswer[]; fresh?: boolean; weekly?: { pct: number | null }; store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void> } = {}) {
   const pins = opts.pins ?? UPSTREAM_DEFAULTS
   if (opts.store) {
     const store = opts.store
@@ -76,9 +76,7 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { pins?: Record<string, 
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: u }
   })
   on('prompt.submit', ($, e) => { entered.push(e.text); return { text: e.text } })
-  const compacts: string[] = []
-  // A plugin's own call reaches the test bottom as passed, without trigger or messages; the engine fills them in.
-  on('session.compact', ($, e) => { compacts.push(e.trigger ?? 'plugin'); return opts.compactSkip ? { skip: opts.compactSkip } : { messages: e.messages?.length ? e.messages : [{ role: 'user' as const, text: 'summary', toolUses: [] }], tokensAfter: 8000 } })
+  on('session.compact', ($, e) => ({ messages: e.messages }))
   on('classic.SessionStart', () => ({}))
   on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
   on('ui.status', ($, e) => { status.push(e.text); return { value: undefined } })
@@ -102,11 +100,11 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { pins?: Record<string, 
     if (typeof a !== 'string') return { value: a }
     return { value: { isAnswered: true, text: a, usage: { input_tokens: 400, output_tokens: 12, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }
   })
-  return { forks, status, logs, entered, reads, asked, compacts }
+  return { forks, status, logs, entered, reads, asked }
 }
 
-// berkays-mods: this copy's own tests run with its defaults, only always and auto-compact pinned off.
-const bworld = (on: On, forkAnswers: ForkAnswer[], opts: Parameters<typeof world>[2] = {}) => world(on, forkAnswers, { pins: { always: false, compact: false }, ...opts })
+// berkays-mods: this copy's own tests run with its defaults, only always pinned off.
+const bworld = (on: On, forkAnswers: ForkAnswer[], opts: Parameters<typeof world>[2] = {}) => world(on, forkAnswers, { pins: { always: false }, ...opts })
 
 const warm: ForkAnswer = { read: 200000, write: 0 }
 // A ping that finds nothing to fork leaves the window waiting, with a wake at the cold mark and no further fork.
@@ -3379,7 +3377,7 @@ describe('keepwarm limits', () => {
 })
 
 describe('berkays-mods defaults', () => {
-  test('a fresh store arms an 8h window at start and compacts before the cache goes cold, so the comeback is not a cold send', async ($, on) => {
+  test('a fresh store arms an 8h window at start and only warns on a cold send', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const store = new Map<string, unknown>()
     const w = world(on, [], { store, fresh: true })
@@ -3388,128 +3386,8 @@ describe('berkays-mods defaults', () => {
     expect(store.get('deadline:S1')).toBe(START + 8 * HOUR)
     await $.turn.complete(turn())
     await clock.advance(9 * HOUR)
-    expect(w.compacts).toEqual(['plugin'])
-    await $.prompt.submit(prompt('hi'))
-    expect(w.entered).toEqual(['hi'])
-    expect(w.logs.some(l => /Sending anyway/.test(l))).toBe(false)
-  })
-
-  test('with auto-compact off, a cold send is only warned about', async ($, on) => {
-    const clock = mock.clock(on, { now: START })
-    const w = world(on, [], { store: new Map<string, unknown>([['compact', false]]), fresh: true })
-    await $.session.start(session)
-    await $.turn.complete(turn())
-    await clock.advance(9 * HOUR)
     await $.prompt.submit(prompt('hi'))
     expect(w.entered).toEqual(['hi'])
     expect(w.logs.some(l => /Sending anyway/.test(l))).toBe(true)
-  })
-})
-
-// berkays-mods: auto-compact an idle session shortly before its prompt cache goes cold.
-describe('auto-compact before cold', () => {
-  // keepwarm off, compact left at its default (on at 100k).
-  const compactOn = () => new Map<string, unknown>([['always', false]])
-
-  test('fires once, 5 minutes before cold, and the compaction does not re-trigger it', async ($, on) => {
-    const clock = mock.clock(on, { now: START })
-    const w = world(on, [], { store: compactOn(), fresh: true, live: { tokens: 200000 } })
-    await $.session.start(session)
-    await $.turn.complete(turn())
-    await clock.advance(54 * MIN)
-    expect(w.compacts).toEqual([])
-    await clock.advance(1 * MIN)
-    expect(w.compacts).toEqual(['plugin'])
-    expect(w.logs.at(-1)).toMatch(/auto-compacted 200k tokens 5m before the prompt cache went cold/)
-    await clock.advance(3 * HOUR)
-    expect(w.compacts).toEqual(['plugin'])
-    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/reset by compaction/)
-  })
-
-  test('a context under the threshold is left alone', async ($, on) => {
-    const clock = mock.clock(on, { now: START })
-    const w = world(on, [], { store: compactOn(), fresh: true, live: { tokens: 60000 } })
-    await $.session.start(session)
-    await $.turn.complete(turn())
-    await clock.advance(2 * HOUR)
-    expect(w.compacts).toEqual([])
-  })
-
-  test('a turn starting cancels it, and its end arms a new one for the next idle stretch', async ($, on) => {
-    const clock = mock.clock(on, { now: START })
-    on('turn.start', ($, e) => ({ turnId: e.turnId }))
-    const w = world(on, [], { store: compactOn(), fresh: true, live: { tokens: 200000 } })
-    await $.session.start(session)
-    await $.turn.complete(turn())
-    await clock.advance(40 * MIN)
-    await $.turn.start({ text: 'long job', turnId: 'long' })
-    await clock.advance(30 * MIN)
-    expect(w.compacts).toEqual([])
-    await $.turn.complete(turn({ turnId: 'long' }))
-    await clock.advance(54 * MIN)
-    expect(w.compacts).toEqual([])
-    await clock.advance(1 * MIN)
-    expect(w.compacts).toEqual(['plugin'])
-  })
-
-  test('a subagent turn neither cancels nor delays it', async ($, on) => {
-    const clock = mock.clock(on, { now: START })
-    on('turn.start', ($, e) => ({ turnId: e.turnId }))
-    const w = world(on, [], { store: compactOn(), fresh: true, live: { tokens: 200000 } })
-    await $.session.start(session)
-    await $.turn.complete(turn())
-    await clock.advance(30 * MIN)
-    await $.turn.start({ text: 'sub', turnId: 'sub', agentId: 'a1' })
-    await $.turn.complete(turn({ turnId: 'sub', agentId: 'a1' }))
-    await clock.advance(25 * MIN)
-    expect(w.compacts).toEqual(['plugin'])
-  })
-
-  test('/cache-tax compact off switches it off for good, and a threshold turns it back on', async ($, on) => {
-    const clock = mock.clock(on, { now: START })
-    const store = compactOn()
-    const w = world(on, [], { store, fresh: true, live: { tokens: 200000 } })
-    await $.session.start(session)
-    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/compact     on, an idle session over 100k/)
-    await $.turn.complete(turn())
-    expect((await $.command.run(run('cache-tax', 'compact off'))).text).toBe('auto-compact off')
-    expect(store.get('compact')).toBe(false)
-    await clock.advance(2 * HOUR)
-    expect(w.compacts).toEqual([])
-    expect((await $.command.run(run('cache-tax', 'compact 150k'))).text).toMatch(/on: an idle session over 150k/)
-    expect(store.get('compact')).toBe(150000)
-    expect((await $.command.run(run('cache-tax', 'compact maybe'))).text).toMatch(/takes on, off or a threshold/)
-    await $.command.run(run('cache-tax', 'compact on'))
-    expect(store.has('compact')).toBe(false)
-  })
-
-  test('a vetoed compaction is logged and not retried in the same idle stretch', async ($, on) => {
-    const clock = mock.clock(on, { now: START })
-    const w = world(on, [], { store: compactOn(), fresh: true, live: { tokens: 200000 }, compactSkip: 'held by another mod' })
-    await $.session.start(session)
-    await $.turn.complete(turn())
-    await clock.advance(55 * MIN)
-    expect(w.compacts).toEqual(['plugin'])
-    expect(w.logs.at(-1)).toBe('auto-compact skipped: held by another mod')
-    await clock.advance(2 * HOUR)
-    expect(w.compacts).toEqual(['plugin'])
-  })
-
-  test('keepwarm pings move it; once the pings stop it fires before that cache goes cold', async ($, on) => {
-    const clock = mock.clock(on, { now: START })
-    const w = world(on, [warm, null], { store: compactOn(), fresh: true, live: { tokens: 200000 } })
-    await $.session.start(session)
-    await $.command.run(run('keepwarm', '6h'))
-    await $.turn.complete(turn())
-    await clock.advance(56 * MIN)
-    expect(w.forks.length).toBe(1)
-    expect(w.compacts).toEqual([])
-    // The second ping at 100m fails and stops keepwarm; the 50m ping's cache goes cold at 110m, so it fires at 105m.
-    await clock.advance(48 * MIN)
-    expect(w.forks.length).toBe(2)
-    expect(w.compacts).toEqual([])
-    await clock.advance(1 * MIN)
-    expect(w.forks.length).toBe(2)
-    expect(w.compacts).toEqual(['plugin'])
   })
 })
